@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 1.2.3). Falls back to csproj value."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows/desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $input = "${{ github.event.inputs.version }}"
+          if ($input) { $v = $input }
+          elseif ($ref -match '^v(.+)$') { $v = $Matches[1] }
+          else { $v = "0.0.0" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Version = $v"
+
+      - name: Restore
+        run: dotnet restore
+
+      # フレームワーク依存版（軽量・.NET 9 ランタイムが別途必要）
+      - name: Publish (framework-dependent)
+        run: >
+          dotnet publish -c Release -r win-x64 --self-contained false
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/framework-dependent
+
+      # 自己完結版（.NET ランタイム同梱・そのまま動く / WebView2 ランタイムのみ必要）
+      - name: Publish (self-contained)
+        run: >
+          dotnet publish -c Release -r win-x64 --self-contained true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/self-contained
+
+      - name: Package zips
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Compress-Archive -Path publish/framework-dependent/* -DestinationPath "artifacts/ClaudeTokenMonitor-$v-win-x64.zip" -Force
+          Compress-Archive -Path publish/self-contained/*  -DestinationPath "artifacts/ClaudeTokenMonitor-$v-win-x64-selfcontained.zip" -Force
+          Get-ChildItem artifacts
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeTokenMonitor-win-x64
+          path: windows/desktop/artifacts/*.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: windows/desktop/artifacts/*.zip
+          generate_release_notes: true
+          body: |
+            ## Claude Code トークン監視 ${{ github.ref_name }}
+
+            Windows 用ネイティブアプリ（.NET 9 + WebView2）。
+
+            ### ダウンロード
+            | ファイル | 説明 |
+            |---|---|
+            | `ClaudeTokenMonitor-*-win-x64-selfcontained.zip` | **おすすめ。** .NET ランタイム同梱。展開して `ClaudeTokenMonitor.exe` をダブルクリックするだけ。 |
+            | `ClaudeTokenMonitor-*-win-x64.zip` | 軽量版。別途 [.NET 9 ランタイム](https://dotnet.microsoft.com/download/dotnet/9.0) が必要。 |
+
+            > いずれも Microsoft Edge WebView2 ランタイムが必要です（Windows 11 は標準搭載）。

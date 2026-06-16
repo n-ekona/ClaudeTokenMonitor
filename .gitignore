@@ -1,0 +1,18 @@
+# ---- .NET build output ----
+[Bb]in/
+[Oo]bj/
+publish/
+publish-standalone/
+*.user
+*.suo
+.vs/
+
+# ---- Release packaging ----
+*.zip
+artifacts/
+
+# ---- OS / editor ----
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
