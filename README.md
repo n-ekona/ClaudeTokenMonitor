@@ -25,6 +25,30 @@ dotnet publish -c Release -r win-x64 --self-contained false -o publish
 
 詳細は [windows/desktop/README.md](windows/desktop/README.md) を参照してください。
 
+### macOS（Swift + WKWebView）
+
+```bash
+cd mac
+./build.sh          # dist/ClaudeTokenMonitor.app を生成
+open dist/ClaudeTokenMonitor.app
+```
+
+詳細は [mac/README.md](mac/README.md) を参照してください。
+
+### Linux（C + GTK3 + WebKitGTK）
+
+```bash
+cd linux
+./build.sh          # または make
+./tokenmonitor
+```
+
+詳細は [linux/README.md](linux/README.md) を参照してください。
+
+> 各 OS 版は同じダッシュボード UI（`web/index.html`）を、OS ネイティブの WebView
+> （Windows=WebView2 / macOS=WKWebView / Linux=WebKitGTK）でネイティブ表示します。
+> 集計ロジックは各 OS のネイティブ言語（C# / Swift / C）に移植して共通の仕様で動作します。
+
 ## リリースの作り方（メンテナ向け）
 
 バージョンタグを push すると、[`.github/workflows/release.yml`](.github/workflows/release.yml) が

@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Claude Code トークン監視</title>
+<script src="chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2027;
+    --panel2: #222a33;
+    --text: #e6e9ee;
+    --muted: #8a94a3;
+    --accent: #d97757;
+    --accent2: #6ba8d9;
+    --green: #5fb878;
+    --line: #2c343d;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans CJK JP", Meiryo, sans-serif;
+    user-select: none;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--green); margin-right:6px; transition: background .3s; }
+  .dot.stale { background: var(--muted); }
+  .dot.pulse { animation: pulse .6s ease; }
+  @keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(95,184,120,.6);} 100%{ box-shadow:0 0 0 8px rgba(95,184,120,0);} }
+  main { padding: 22px; max-width: 1180px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; transition: color .2s; }
+  .card .value.bumping { color: var(--green); }
+  .value.cost.bumping { color: #f0a07a; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .value.cost { color: var(--accent); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 860px){ .grid2 { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 22px; }
+  .panel h2 { font-size: 14px; margin: 0 0 14px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  tbody tr:hover { background: var(--panel2); }
+  .name { font-weight: 600; }
+  .controls { display:flex; align-items:center; gap:8px; margin-left:auto; }
+  .controls input { width: 58px; background: var(--panel2); border:1px solid var(--line); color: var(--text); border-radius:6px; padding:5px 8px; font-size:13px; }
+  .controls input#rate { width: 66px; }
+  .controls input#rate[readonly] { opacity:.7; cursor:default; }
+  .controls label { color: var(--muted); font-size:12px; }
+  .controls .chk { display:flex; align-items:center; gap:4px; cursor:pointer; }
+  .controls .chk input { width:auto; }
+  #rateInfo { font-size:11px; white-space:nowrap; }
+  .sep { width:1px; height:18px; background:var(--line); margin:0 4px; }
+  canvas { max-height: 260px; }
+  .legend { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; font-size:12px; color:var(--muted); }
+  .legend span i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .panel h2 select { margin-left:10px; background: var(--panel2); border:1px solid var(--line); color: var(--text); border-radius:6px; padding:3px 8px; font-size:12px; font-weight:400; }
+  .hm-scroll { overflow-x:auto; overflow-y:hidden; padding-bottom:6px; }
+  .hm-svg { display:block; }
+  .hm-svg text.hm-label { fill: var(--muted); font-size:9px; }
+  .hm-legend { display:flex; align-items:center; gap:4px; margin-top:10px; font-size:11px; color:var(--muted); }
+  .hm-legend i { width:11px; height:11px; border-radius:2px; display:inline-block; }
+  .hm-legend i.l0{background:#161b22}.hm-legend i.l1{background:#0e4429}.hm-legend i.l2{background:#006d32}.hm-legend i.l3{background:#26a641}.hm-legend i.l4{background:#39d353}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔭 Claude Code トークン監視</h1>
+  <span class="meta"><span id="statusDot" class="dot"></span><span id="status">待機中…</span></span>
+  <span class="meta" id="projectsDir"></span>
+  <div class="controls">
+    <label>更新</label><input id="interval" type="number" value="3" min="1" max="600" step="1" /><label>秒ごと</label>
+    <span class="sep"></span>
+    <label>1ドル=</label><input id="rate" type="number" value="155" min="1" step="0.01" /><label>円</label>
+    <label class="chk"><input id="rateAuto" type="checkbox" checked />自動</label>
+    <span class="meta" id="rateInfo"></span>
+  </div>
+</header>
+<main>
+  <div class="cards">
+    <div class="card">
+      <div class="label">総トークン数</div>
+      <div class="value" id="totalTokens">–</div>
+      <div class="sub" id="totalBreakdown"></div>
+    </div>
+    <div class="card">
+      <div class="label">推定コスト</div>
+      <div class="value cost" id="totalCostUsd">–</div>
+      <div class="sub" id="totalCostJpy"></div>
+    </div>
+    <div class="card">
+      <div class="label">入力 / 出力</div>
+      <div class="value" id="ioTokens">–</div>
+      <div class="sub" id="ioSub"></div>
+    </div>
+    <div class="card">
+      <div class="label">キャッシュ (書込 / 読込)</div>
+      <div class="value" id="cacheTokens">–</div>
+      <div class="sub" id="cacheSub"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>アクティビティ（草）</h2>
+    <div id="heatmap" class="hm-scroll"></div>
+    <div class="hm-legend"><span>少</span><i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><span>多</span></div>
+    <div class="legend" id="hmSummary"></div>
+  </div>
+
+  <div class="panel">
+    <h2>日別の使用量
+      <select id="dayRange">
+        <option value="7">直近7日</option>
+        <option value="14">直近14日</option>
+        <option value="30">直近30日</option>
+      </select>
+    </h2>
+    <canvas id="dailyChart"></canvas>
+    <div class="legend" id="dailySummary"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>モデル別トークン</h2>
+      <canvas id="modelChart"></canvas>
+      <div class="legend" id="modelLegend"></div>
+    </div>
+    <div class="panel">
+      <h2>プロジェクト別トークン</h2>
+      <canvas id="projectChart"></canvas>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>モデル別 内訳</h2>
+    <table>
+      <thead>
+        <tr><th>モデル</th><th>合計</th><th>入力</th><th>出力</th><th>Cache書込</th><th>Cache読込</th><th>メッセージ</th><th>コスト</th></tr>
+      </thead>
+      <tbody id="modelTable"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>プロジェクト別 内訳</h2>
+    <table>
+      <thead>
+        <tr><th>プロジェクト</th><th>合計トークン</th><th>メッセージ</th><th>コスト</th></tr>
+      </thead>
+      <tbody id="projectTable"></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const COLORS = ['#d97757','#6ba8d9','#5fb878','#c9a45c','#a978d9','#d96b9a','#5fc4c4','#9aa0aa'];
+let jpyRate = 155;
+let lastData = null;
+let intervalInitialized = false;
+
+// ---- ネイティブ橋渡し (mac WKWebView / linux WebKitGTK 共通) -----------------
+// どちらの WebKit も window.webkit.messageHandlers.<name>.postMessage で JS→ネイティブ、
+// ネイティブ→JS は evaluateJavaScript("window.__recv(<json>)") で行う。
+function sendToNative(msg){
+  try {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tokenmonitor){
+      window.webkit.messageHandlers.tokenmonitor.postMessage(msg);
+    }
+  } catch (_) { /* ブリッジ未接続(ブラウザ単体表示など)は無視 */ }
+}
+// ネイティブ側が N秒ごとにスナップショットを渡す入口
+window.__recv = function(d){
+  try { render(typeof d === 'string' ? JSON.parse(d) : d); } catch (_) {}
+};
+
+// ---- 円相場(USD/JPY)のリアルタイム取得 ----------------------------------
+const rateEl = document.getElementById('rate');
+const rateAutoEl = document.getElementById('rateAuto');
+const rateInfoEl = document.getElementById('rateInfo');
+
+// 無料・APIキー不要・CORS許可のソース（上から順に試す）
+const RATE_SOURCES = [
+  { url: 'https://open.er-api.com/v6/latest/USD',
+    pick: (j) => (j && j.result === 'success' && j.rates) ? j.rates.JPY : null },
+  { url: 'https://api.exchangerate-api.com/v4/latest/USD',
+    pick: (j) => (j && j.rates) ? j.rates.JPY : null },
+];
+
+function fmtClock(){
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getMonth()+1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function fetchRateOnce(){
+  for (const s of RATE_SOURCES){
+    try {
+      const r = await fetch(s.url, { cache: 'no-store' });
+      if (!r.ok) continue;
+      const j = await r.json();
+      const rate = Number(s.pick(j));
+      if (isFinite(rate) && rate > 0) return rate;
+    } catch (_) { /* 次のソースへ */ }
+  }
+  return null;
+}
+
+async function refreshRate(){
+  if (!rateAutoEl.checked) return;
+  rateInfoEl.textContent = '取得中…';
+  const rate = await fetchRateOnce();
+  if (rate){
+    jpyRate = rate;
+    rateEl.value = rate.toFixed(2);
+    rateInfoEl.textContent = `自動更新 ${fmtClock()}`;
+    try { localStorage.setItem('jpyRate', String(rate)); } catch (_) {}
+  } else {
+    rateInfoEl.textContent = '取得失敗・前回値を使用';
+  }
+}
+
+// 手動編集したら自動更新を解除し、入力値を尊重する
+rateEl.addEventListener('input', (e) => {
+  jpyRate = parseFloat(e.target.value) || 0;
+  if (rateAutoEl.checked){ rateAutoEl.checked = false; rateEl.readOnly = false; rateInfoEl.textContent = '手動'; }
+});
+
+rateAutoEl.addEventListener('change', () => {
+  if (rateAutoEl.checked){ rateEl.readOnly = true; refreshRate(); }
+  else { rateEl.readOnly = false; rateInfoEl.textContent = '手動'; }
+});
+
+// 起動時: 前回取得値があれば即適用 → APIで更新。以後30分ごとに更新。
+(function initRate(){
+  try {
+    const cached = parseFloat(localStorage.getItem('jpyRate'));
+    if (isFinite(cached) && cached > 0){ jpyRate = cached; rateEl.value = cached.toFixed(2); }
+  } catch (_) {}
+  rateEl.readOnly = rateAutoEl.checked;
+  refreshRate();
+  setInterval(refreshRate, 30 * 60 * 1000);
+})();
+
+// 更新間隔の変更をネイティブへ通知
+document.getElementById('interval').addEventListener('change', (e) => {
+  let sec = parseInt(e.target.value, 10);
+  if (!Number.isFinite(sec) || sec < 1) sec = 1;
+  if (sec > 600) sec = 600;
+  e.target.value = sec;
+  sendToNative(JSON.stringify({ type: 'interval', ms: sec * 1000 }));
+});
+
+function fmt(n){ return Math.round(n).toLocaleString('ja-JP'); }
+function fmtUsd(n){ return '$' + n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function fmtJpy(n){ return '¥' + Math.round(n).toLocaleString('ja-JP'); }
+function compact(n){
+  if (n >= 1e9) return (n/1e9).toFixed(2)+'B';
+  if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return String(Math.round(n));
+}
+
+// ---- カウントアップ アニメーション --------------------------------------
+// 各メトリクスは「現在表示値(cur)」を「目標値(target)」へ向けてイージング。
+// 初回は 0 から、以降は前回値から実データへ滑らかに増減する。
+const tweens = {
+  tokens: { cur: 0, target: 0, el: 'totalTokens', eps: 0.5, fmt },
+  io:     { cur: 0, target: 0, el: 'ioTokens',     eps: 0.5, fmt },
+  cache:  { cur: 0, target: 0, el: 'cacheTokens',  eps: 0.5, fmt },
+  cost:   { cur: 0, target: 0, el: 'totalCostUsd', eps: 0.005, fmt: fmtUsd },
+};
+const EASE = 0.16; // 1フレームあたりの寄せ率（大きいほど速い）
+
+function animate(){
+  for (const k in tweens){
+    const tw = tweens[k];
+    const diff = tw.target - tw.cur;
+    if (Math.abs(diff) < tw.eps) tw.cur = tw.target;
+    else tw.cur += diff * EASE;
+    const el = document.getElementById(tw.el);
+    if (el) el.textContent = tw.fmt(tw.cur);
+    if (k === 'cost'){
+      const jpy = document.getElementById('totalCostJpy');
+      if (jpy) jpy.textContent = jpyRate ? `≈ ${fmtJpy(tw.cur * jpyRate)}` : '';
+    }
+  }
+  requestAnimationFrame(animate);
+}
+
+function bump(id){
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.add('bumping');
+  setTimeout(() => el.classList.remove('bumping'), 350);
+}
+
+// ---- チャート ------------------------------------------------------------
+let modelChart, projectChart, dailyChart;
+function initCharts(){
+  modelChart = new Chart(document.getElementById('modelChart'), {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: COLORS, borderColor: '#1a2027', borderWidth: 2 }] },
+    options: { animation:{duration:400}, plugins: { legend: { display:false } }, cutout: '60%' }
+  });
+  projectChart = new Chart(document.getElementById('projectChart'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: '#6ba8d9', borderRadius:4 }] },
+    options: {
+      animation:{duration:400},
+      indexAxis: 'y',
+      plugins: { legend: { display:false } },
+      scales: {
+        x: { ticks: { color:'#8a94a3', callback:(v)=>compact(v) }, grid: { color:'#2c343d' } },
+        y: { ticks: { color:'#e6e9ee' }, grid: { display:false } }
+      }
+    }
+  });
+  dailyChart = new Chart(document.getElementById('dailyChart'), {
+    type: 'bar',
+    data: { labels: [], datasets: [
+      { type:'bar', label:'トークン', data:[], backgroundColor:'#6ba8d9', borderRadius:4, yAxisID:'y', order:2 },
+      { type:'line', label:'コスト(USD)', data:[], borderColor:'#d97757', backgroundColor:'#d97757', yAxisID:'y1', tension:0.3, pointRadius:3, borderWidth:2, order:1 }
+    ] },
+    options: {
+      animation:{duration:400},
+      plugins: {
+        legend: { display:true, labels:{ color:'#8a94a3', boxWidth:12, usePointStyle:true } },
+        tooltip: { callbacks: { label:(c)=> c.datasetIndex===1 ? `コスト ${fmtUsd(c.parsed.y)}` : `トークン ${fmt(c.parsed.y)}` } }
+      },
+      scales: {
+        y:  { position:'left',  beginAtZero:true, ticks:{ color:'#8a94a3', callback:(v)=>compact(v) }, grid:{ color:'#2c343d' } },
+        y1: { position:'right', beginAtZero:true, ticks:{ color:'#d97757', callback:(v)=>'$'+v.toFixed(2) }, grid:{ display:false } },
+        x:  { ticks:{ color:'#e6e9ee' }, grid:{ display:false } }
+      }
+    }
+  });
+}
+
+// ---- 日別の時系列グラフ & 草(ヒートマップ) ------------------------------
+function renderDailyChart(days){
+  const range = parseInt(document.getElementById('dayRange').value, 10) || 7;
+  const series = days.slice(-range);
+  dailyChart.data.labels = series.map(x => x.date.slice(5).replace('-','/'));
+  dailyChart.data.datasets[0].data = series.map(x => x.tokens);
+  dailyChart.data.datasets[1].data = series.map(x => x.cost);
+  dailyChart.update();
+  const sumTok = series.reduce((a,x)=>a + x.tokens, 0);
+  const sumCost = series.reduce((a,x)=>a + x.cost, 0);
+  document.getElementById('dailySummary').textContent =
+    `直近${range}日 合計: ${fmt(sumTok)} トークン · ${fmtUsd(sumCost)}` + (jpyRate ? ` (≈ ${fmtJpy(sumCost * jpyRate)})` : '');
+}
+
+const HM_COLORS = ['#161b22','#0e4429','#006d32','#26a641','#39d353'];
+function renderHeatmap(days){
+  const host = document.getElementById('heatmap');
+  if (!days || !days.length){ host.innerHTML = ''; return; }
+  const cell = 11, gap = 3, step = cell + gap, topPad = 16, leftPad = 24;
+  // 非ゼロ日の四分位でレベル分け（GitHub風）
+  const vals = days.map(d => d.tokens).filter(v => v > 0).sort((a,b)=>a-b);
+  const q = (p) => vals.length ? vals[Math.floor((vals.length-1)*p)] : 0;
+  const q1 = q(.25), q2 = q(.5), q3 = q(.75);
+  const lvl = (v) => v<=0?0 : v<=q1?1 : v<=q2?2 : v<=q3?3 : 4;
+  // 週開始(日曜)に合わせて先頭へ空きセルを補う
+  const first = new Date(days[0].date + 'T00:00:00');
+  const offset = first.getDay(); // 0=日曜
+  const cells = [];
+  for (let i=0;i<offset;i++) cells.push(null);
+  for (const d of days) cells.push(d);
+  const weeks = Math.ceil(cells.length / 7);
+  const W = leftPad + weeks*step + 4, H = topPad + 7*step;
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('class','hm-svg');
+  const wd = ['','月','','水','','金',''];
+  for (let r=0;r<7;r++){
+    if (!wd[r]) continue;
+    const t = document.createElementNS(ns,'text');
+    t.setAttribute('x', 0); t.setAttribute('y', topPad + r*step + cell - 1);
+    t.setAttribute('class','hm-label'); t.textContent = wd[r];
+    svg.appendChild(t);
+  }
+  let lastMonth = -1;
+  for (let i=0;i<cells.length;i++){
+    const week = Math.floor(i/7), day = i%7, d = cells[i];
+    if (!d) continue;
+    const dt = new Date(d.date + 'T00:00:00'), m = dt.getMonth();
+    if (day === 0 && m !== lastMonth){
+      lastMonth = m;
+      const t = document.createElementNS(ns,'text');
+      t.setAttribute('x', leftPad + week*step); t.setAttribute('y', topPad - 5);
+      t.setAttribute('class','hm-label'); t.textContent = (m+1)+'月';
+      svg.appendChild(t);
+    }
+    const rect = document.createElementNS(ns,'rect');
+    rect.setAttribute('x', leftPad + week*step); rect.setAttribute('y', topPad + day*step);
+    rect.setAttribute('width', cell); rect.setAttribute('height', cell);
+    rect.setAttribute('rx', 2); rect.setAttribute('fill', HM_COLORS[lvl(d.tokens)]);
+    const title = document.createElementNS(ns,'title');
+    title.textContent = `${d.date}: ${fmt(d.tokens)} トークン · ${d.messages} メッセージ · ${fmtUsd(d.cost)}`;
+    rect.appendChild(title);
+    svg.appendChild(rect);
+  }
+  host.innerHTML = ''; host.appendChild(svg);
+  host.scrollLeft = host.scrollWidth; // 最新(右端)へ
+  const active = days.filter(d => d.tokens > 0).length;
+  const totalTok = days.reduce((a,d)=>a + d.tokens, 0);
+  document.getElementById('hmSummary').textContent =
+    `直近${days.length}日: ${active}日アクティブ · 合計 ${fmt(totalTok)} トークン`;
+}
+
+let lastDailySig = null;
+function dailySig(days){ let s = 0; for (const d of days) s += d.tokens; return days.length + ':' + s; }
+function renderTimeline(d){
+  const days = d.daily || [];
+  const sig = dailySig(days);
+  if (sig === lastDailySig) return; // 変化なしなら再描画しない（草のスクロール位置を保持）
+  lastDailySig = sig;
+  renderDailyChart(days);
+  renderHeatmap(days);
+}
+document.getElementById('dayRange').addEventListener('change', () => { if (lastData) renderDailyChart(lastData.daily || []); });
+
+// ---- 描画 ----------------------------------------------------------------
+function render(d){
+  const prevTokens = lastData ? lastData.total.tokens : 0;
+  lastData = d;
+  const t = d.total;
+
+  // カウントアップの目標値を更新（数字は animate() が滑らかに追従）
+  tweens.tokens.target = t.tokens;
+  tweens.io.target     = t.input + t.output;
+  tweens.cache.target  = t.cacheWrite5m + t.cacheWrite1h + t.cacheRead;
+  tweens.cost.target   = t.cost;
+
+  // 増加があれば軽くハイライト＆ステータスをパルス
+  if (t.tokens > prevTokens){
+    bump('totalTokens'); bump('totalCostUsd');
+    const dot = document.getElementById('statusDot');
+    dot.classList.remove('pulse'); void dot.offsetWidth; dot.classList.add('pulse');
+  }
+
+  document.getElementById('totalBreakdown').textContent =
+    `${d.models.length} モデル · ${t.messages.toLocaleString('ja-JP')} メッセージ`;
+  document.getElementById('ioSub').textContent = `入力 ${compact(t.input)} / 出力 ${compact(t.output)}`;
+  const cw = t.cacheWrite5m + t.cacheWrite1h;
+  document.getElementById('cacheSub').textContent =
+    `書込 ${compact(cw)} (5m ${compact(t.cacheWrite5m)} / 1h ${compact(t.cacheWrite1h)}) · 読込 ${compact(t.cacheRead)}`;
+
+  // チャート
+  modelChart.data.labels = d.models.map(m => m.name);
+  modelChart.data.datasets[0].data = d.models.map(m => m.tokens);
+  modelChart.update();
+  document.getElementById('modelLegend').innerHTML = d.models.map((m,i) =>
+    `<span><i style="background:${COLORS[i%COLORS.length]}"></i>${m.name} (${compact(m.tokens)})</span>`).join('');
+
+  const projTop = d.projects.slice(0, 10);
+  projectChart.data.labels = projTop.map(p => p.name);
+  projectChart.data.datasets[0].data = projTop.map(p => p.tokens);
+  projectChart.update();
+
+  // 時系列グラフ & 草
+  renderTimeline(d);
+
+  // テーブル
+  document.getElementById('modelTable').innerHTML = d.models.map(m => `
+    <tr>
+      <td class="name">${m.name}</td>
+      <td>${fmt(m.tokens)}</td>
+      <td>${fmt(m.input)}</td>
+      <td>${fmt(m.output)}</td>
+      <td>${fmt(m.cacheWrite5m + m.cacheWrite1h)}</td>
+      <td>${fmt(m.cacheRead)}</td>
+      <td>${m.messages.toLocaleString('ja-JP')}</td>
+      <td>${fmtUsd(m.cost)}</td>
+    </tr>`).join('');
+
+  document.getElementById('projectTable').innerHTML = d.projects.map(p => `
+    <tr>
+      <td class="name">${p.name}</td>
+      <td>${fmt(p.tokens)}</td>
+      <td>${p.messages.toLocaleString('ja-JP')}</td>
+      <td>${fmtUsd(p.cost)}</td>
+    </tr>`).join('');
+
+  document.getElementById('projectsDir').textContent = d.projectsDir;
+
+  // 初回のみ、ネイティブ側の現在の更新間隔を入力欄へ反映
+  if (!intervalInitialized && typeof d.intervalMs === 'number'){
+    document.getElementById('interval').value = Math.round(d.intervalMs / 1000);
+    intervalInitialized = true;
+  }
+
+  updateStatus(d.lastActivity);
+}
+
+function updateStatus(lastActivity){
+  const dot = document.getElementById('statusDot');
+  const status = document.getElementById('status');
+  if (!lastActivity){ status.textContent = 'データ待機中'; dot.classList.add('stale'); return; }
+  const ago = Date.now() - new Date(lastActivity).getTime();
+  const mins = Math.floor(ago / 60000);
+  dot.classList.toggle('stale', mins > 5);
+  if (mins < 1) status.textContent = '最終アクティビティ: たった今';
+  else if (mins < 60) status.textContent = `最終アクティビティ: ${mins}分前`;
+  else status.textContent = `最終アクティビティ: ${Math.floor(mins/60)}時間前`;
+}
+
+initCharts();
+requestAnimationFrame(animate);
+
+// ネイティブへ初回スナップショットを要求
+sendToNative('ready');
+setInterval(() => { if (lastData) updateStatus(lastData.lastActivity); }, 30000);
+</script>
+</body>
+</html>
