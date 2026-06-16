@@ -8,12 +8,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # ---- Windows (.NET 9) ----
+  windows:
     runs-on: windows-latest
     defaults:
       run:
         working-directory: windows/desktop
-
     steps:
       - uses: actions/checkout@v4
 
@@ -27,3 +27,35 @@ jobs:
 
       - name: Build
         run: dotnet build -c Release --no-restore
+
+  # ---- macOS (Swift + WKWebView, universal) ----
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal .app
+        run: ./build.sh
+        working-directory: mac
+
+      - name: Verify architectures
+        run: lipo -archs mac/dist/ClaudeTokenMonitor.app/Contents/MacOS/ClaudeTokenMonitor
+
+  # ---- Linux (C + GTK3 + WebKitGTK) — CI は ubuntu でビルド確認 ----
+  linux:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Install toolchain & deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates build-essential pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libjson-glib-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: ./build.sh
+        working-directory: linux

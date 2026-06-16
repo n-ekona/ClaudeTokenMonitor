@@ -7,19 +7,36 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (e.g. 1.2.3). Falls back to csproj value."
+        description: "Version to build (e.g. 1.2.3). Falls back to 0.0.0."
         required: false
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  # ---- バージョン解決（各ジョブで共有） ----
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: ver
+        run: |
+          input="${{ github.event.inputs.version }}"
+          ref="${{ github.ref_name }}"
+          if [ -n "$input" ]; then v="$input"
+          elif echo "$ref" | grep -qE '^v'; then v="${ref#v}"
+          else v="0.0.0"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Version = $v"
+
+  # ---- Windows (.NET 9 + WebView2) ----
+  windows:
+    needs: version
     runs-on: windows-latest
     defaults:
       run:
         working-directory: windows/desktop
-
     steps:
       - uses: actions/checkout@v4
 
@@ -28,18 +45,6 @@ jobs:
         with:
           dotnet-version: "9.0.x"
 
-      - name: Resolve version
-        id: ver
-        shell: pwsh
-        run: |
-          $ref = "${{ github.ref_name }}"
-          $input = "${{ github.event.inputs.version }}"
-          if ($input) { $v = $input }
-          elseif ($ref -match '^v(.+)$') { $v = $Matches[1] }
-          else { $v = "0.0.0" }
-          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Version = $v"
-
       - name: Restore
         run: dotnet restore
 
@@ -47,46 +52,159 @@ jobs:
       - name: Publish (framework-dependent)
         run: >
           dotnet publish -c Release -r win-x64 --self-contained false
-          -p:Version=${{ steps.ver.outputs.version }}
+          -p:Version=${{ needs.version.outputs.version }}
           -o publish/framework-dependent
 
-      # 自己完結版（.NET ランタイム同梱・そのまま動く / WebView2 ランタイムのみ必要）
+      # 自己完結版（.NET ランタイム同梱 / WebView2 ランタイムのみ必要）
       - name: Publish (self-contained)
         run: >
           dotnet publish -c Release -r win-x64 --self-contained true
-          -p:Version=${{ steps.ver.outputs.version }}
+          -p:Version=${{ needs.version.outputs.version }}
           -o publish/self-contained
 
       - name: Package zips
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
+          $v = "${{ needs.version.outputs.version }}"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           Compress-Archive -Path publish/framework-dependent/* -DestinationPath "artifacts/ClaudeTokenMonitor-$v-win-x64.zip" -Force
           Compress-Archive -Path publish/self-contained/*  -DestinationPath "artifacts/ClaudeTokenMonitor-$v-win-x64-selfcontained.zip" -Force
           Get-ChildItem artifacts
 
-      - name: Upload build artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ClaudeTokenMonitor-win-x64
+          name: dist-windows
           path: windows/desktop/artifacts/*.zip
 
+  # ---- macOS (Swift + WKWebView, universal) ----
+  macos:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal .app
+        run: ./build.sh
+        working-directory: mac
+
+      - name: Verify architectures
+        run: lipo -archs mac/dist/ClaudeTokenMonitor.app/Contents/MacOS/ClaudeTokenMonitor
+
+      - name: Package zip
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          ditto -c -k --sequesterRsrc --keepParent \
+            mac/dist/ClaudeTokenMonitor.app \
+            "ClaudeTokenMonitor-$v-mac-x64.zip"
+          ls -la ClaudeTokenMonitor-*-mac-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: ClaudeTokenMonitor-*-mac-x64.zip
+
+  # ---- Linux (C + GTK3 + WebKitGTK) — distro ごとに per-distro binary zip ----
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu
+            image: ubuntu:24.04
+            install: |
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                git ca-certificates build-essential pkg-config zip \
+                libgtk-3-dev libwebkit2gtk-4.1-dev libjson-glib-dev
+          - distro: almalinux9
+            image: almalinux:9
+            install: |
+              dnf install -y dnf-plugins-core
+              dnf config-manager --set-enabled crb
+              dnf install -y git gcc make pkgconf-pkg-config zip \
+                gtk3-devel webkit2gtk4.1-devel json-glib-devel
+          - distro: archlinux
+            image: archlinux:latest
+            install: |
+              pacman -Syu --noconfirm --needed \
+                git base-devel zip gtk3 webkit2gtk-4.1 json-glib
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      # checkout には git が要るため、リポジトリ取得前に依存一式を入れる
+      - name: Install toolchain & deps
+        run: ${{ matrix.install }}
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: ./build.sh
+        working-directory: linux
+
+      - name: Package zip (binary + web/)
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          name="ClaudeTokenMonitor-$v-linux-${{ matrix.distro }}-x86_64"
+          mkdir -p "pkg/$name"
+          cp linux/tokenmonitor "pkg/$name/"
+          cp -r linux/web "pkg/$name/"
+          (cd pkg && zip -r "../$name.zip" "$name")
+          ls -la "$name.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.distro }}
+          path: ClaudeTokenMonitor-*-linux-*.zip
+
+  # ---- 成果物を集約して GitHub Release を作成（tag push 時のみ） ----
+  release:
+    needs: [version, windows, macos, linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: List
+        run: find dist -type f | sort
+
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: windows/desktop/artifacts/*.zip
+          files: dist/**/*.zip
           generate_release_notes: true
           body: |
             ## Claude Code トークン監視 ${{ github.ref_name }}
 
-            Windows 用ネイティブアプリ（.NET 9 + WebView2）。
+            3 つの OS 向けネイティブアプリ。いずれも同じダッシュボード UI を
+            OS ネイティブの WebView で表示します。
 
-            ### ダウンロード
+            ### Windows（.NET 9 + WebView2）
             | ファイル | 説明 |
             |---|---|
-            | `ClaudeTokenMonitor-*-win-x64-selfcontained.zip` | **おすすめ。** .NET ランタイム同梱。展開して `ClaudeTokenMonitor.exe` をダブルクリックするだけ。 |
-            | `ClaudeTokenMonitor-*-win-x64.zip` | 軽量版。別途 [.NET 9 ランタイム](https://dotnet.microsoft.com/download/dotnet/9.0) が必要。 |
+            | `*-win-x64-selfcontained.zip` | **おすすめ。** .NET ランタイム同梱。展開して `ClaudeTokenMonitor.exe` を実行。 |
+            | `*-win-x64.zip` | 軽量版。別途 [.NET 9 ランタイム](https://dotnet.microsoft.com/download/dotnet/9.0) が必要。 |
 
-            > いずれも Microsoft Edge WebView2 ランタイムが必要です（Windows 11 は標準搭載）。
+            > Microsoft Edge WebView2 ランタイムが必要です（Windows 11 は標準搭載）。
+
+            ### macOS（Swift + WKWebView）
+            | ファイル | 説明 |
+            |---|---|
+            | `*-mac-x64.zip` | ユニバーサルバイナリ（Intel / Apple Silicon 両対応）。展開して `ClaudeTokenMonitor.app` を実行。 |
+
+            ### Linux（C + GTK3 + WebKitGTK）
+            ディストリごとにビルドした動的リンク版です。お使いの系統に合うものを選んでください。
+            実行には GTK3 / WebKitGTK4.1 / json-glib のランタイムが必要です。
+
+            | ファイル | 対象 |
+            |---|---|
+            | `*-linux-ubuntu-x86_64.zip` | Ubuntu 24.04 / Debian 系 |
+            | `*-linux-almalinux9-x86_64.zip` | AlmaLinux 9 / RHEL 系 |
+            | `*-linux-archlinux-x86_64.zip` | Arch Linux 系 |
