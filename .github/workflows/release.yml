@@ -21,12 +21,17 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
     steps:
       - id: ver
+        # 信頼できない入力は env 経由で受け、shell へ直接展開しない
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          input="${{ github.event.inputs.version }}"
-          ref="${{ github.ref_name }}"
-          if [ -n "$input" ]; then v="$input"
-          elif echo "$ref" | grep -qE '^v'; then v="${ref#v}"
+          if [ -n "$INPUT_VERSION" ]; then v="$INPUT_VERSION"
+          elif printf '%s' "$REF_NAME" | grep -qE '^v'; then v="${REF_NAME#v}"
           else v="0.0.0"; fi
+          # 後続ジョブで式展開されるため、安全な文字種へ正規化する
+          v=$(printf '%s' "$v" | tr -cd '0-9A-Za-z.+_-')
+          [ -n "$v" ] || v="0.0.0"
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Version = $v"
 
@@ -183,28 +188,35 @@ jobs:
           body: |
             ## Claude Code トークン監視 ${{ github.ref_name }}
 
-            3 つの OS 向けネイティブアプリ。いずれも同じダッシュボード UI を
-            OS ネイティブの WebView で表示します。
+            Windows / macOS / Linux 用ネイティブアプリ。いずれも同じダッシュボード UI を、
+            各 OS ネイティブの WebView（WebView2 / WKWebView / WebKitGTK）で表示します。
 
             ### Windows（.NET 9 + WebView2）
+
             | ファイル | 説明 |
             |---|---|
-            | `*-win-x64-selfcontained.zip` | **おすすめ。** .NET ランタイム同梱。展開して `ClaudeTokenMonitor.exe` を実行。 |
-            | `*-win-x64.zip` | 軽量版。別途 [.NET 9 ランタイム](https://dotnet.microsoft.com/download/dotnet/9.0) が必要。 |
+            | `ClaudeTokenMonitor-*-win-x64-selfcontained.zip` | **おすすめ。** .NET ランタイム同梱。展開して `ClaudeTokenMonitor.exe` をダブルクリックするだけ。 |
+            | `ClaudeTokenMonitor-*-win-x64.zip` | 軽量版。別途 [.NET 9 ランタイム](https://dotnet.microsoft.com/download/dotnet/9.0) が必要。 |
 
-            > Microsoft Edge WebView2 ランタイムが必要です（Windows 11 は標準搭載）。
+            > いずれも Microsoft Edge WebView2 ランタイムが必要です（Windows 11 は標準搭載）。
 
             ### macOS（Swift + WKWebView）
+
             | ファイル | 説明 |
             |---|---|
-            | `*-mac-x64.zip` | ユニバーサルバイナリ（Intel / Apple Silicon 両対応）。展開して `ClaudeTokenMonitor.app` を実行。 |
+            | `ClaudeTokenMonitor-*-mac-x64.zip` | **ユニバーサルバイナリ**（Intel / Apple Silicon 両対応）。展開して `ClaudeTokenMonitor.app` を実行。 |
+
+            > 追加ランタイムは不要です（WKWebView は macOS 標準・macOS 11 以降）。
 
             ### Linux（C + GTK3 + WebKitGTK）
+
             ディストリごとにビルドした動的リンク版です。お使いの系統に合うものを選んでください。
-            実行には GTK3 / WebKitGTK4.1 / json-glib のランタイムが必要です。
 
             | ファイル | 対象 |
             |---|---|
-            | `*-linux-ubuntu-x86_64.zip` | Ubuntu 24.04 / Debian 系 |
-            | `*-linux-almalinux9-x86_64.zip` | AlmaLinux 9 / RHEL 系 |
-            | `*-linux-archlinux-x86_64.zip` | Arch Linux 系 |
+            | `ClaudeTokenMonitor-*-linux-ubuntu-x86_64.zip` | Ubuntu 24.04 / Debian 系 |
+            | `ClaudeTokenMonitor-*-linux-almalinux9-x86_64.zip` | AlmaLinux 9 / RHEL 系 |
+            | `ClaudeTokenMonitor-*-linux-archlinux-x86_64.zip` | Arch Linux 系 |
+
+            > 実行には GTK3 / WebKitGTK 4.1 / json-glib のランタイムが必要です（例: Ubuntu は
+            > `sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libjson-glib-1.0-0`）。
