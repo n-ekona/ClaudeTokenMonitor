@@ -126,12 +126,14 @@ jobs:
                 git ca-certificates build-essential pkg-config zip \
                 libgtk-3-dev libwebkit2gtk-4.1-dev libjson-glib-dev
           - distro: almalinux9
+            # EL9 に webkit2gtk4.1 は無いため webkit2gtk3-devel(pc: webkit2gtk-4.0) を使う。
+            # build.sh は 4.1 が無ければ 4.0 へ自動フォールバックする。
             image: almalinux:9
             install: |
               dnf install -y dnf-plugins-core
               dnf config-manager --set-enabled crb
               dnf install -y git gcc make pkgconf-pkg-config zip \
-                gtk3-devel webkit2gtk4.1-devel json-glib-devel
+                gtk3-devel webkit2gtk3-devel json-glib-devel
           - distro: archlinux
             image: archlinux:latest
             install: |
