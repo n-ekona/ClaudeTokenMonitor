@@ -8,6 +8,16 @@ namespace TokenMonitor;
 
 internal static class Program
 {
+    // フチなしPiPウィンドウのドラッグ移動用（OSのウィンドウ移動ループを起動する）
+    private const int WM_NCLBUTTONDOWN = 0xA1;
+    private const int HTCAPTION = 0x2;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ReleaseCapture();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
     [STAThread]
     private static void Main()
     {
@@ -81,9 +91,50 @@ internal static class Program
             core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
 
+            // 正方形(PiP)モードの状態。通常時のウィンドウ位置/サイズを保存して復元する。
+            var pipOn = false;
+            double prevW = win.Width, prevH = win.Height, prevL = win.Left, prevT = win.Top;
+            var prevState = win.WindowState;
+            var prevResize = win.ResizeMode;
+            var prevStyle = win.WindowStyle;
+
+            void SetPip(bool on)
+            {
+                if (on && !pipOn)
+                {
+                    // 通常表示の復元用に現在のジオメトリ/スタイルを退避
+                    prevW = win.Width; prevH = win.Height; prevL = win.Left; prevT = win.Top;
+                    prevState = win.WindowState; prevResize = win.ResizeMode; prevStyle = win.WindowStyle;
+
+                    const double size = 320; // 小さな正方形
+                    win.WindowState = WindowState.Normal;
+                    // タイトルバー（最小化/最大化/×）と枠を消してフチなしの正方形にする
+                    win.WindowStyle = WindowStyle.None;
+                    win.ResizeMode = ResizeMode.NoResize;
+                    win.Topmost = true;                 // 常に最前面
+                    win.Width = size; win.Height = size;
+                    // 画面右下のタスクバーを避けた作業領域の隅へ配置（PiP風）
+                    var wa = SystemParameters.WorkArea;
+                    win.Left = wa.Right - size - 24;
+                    win.Top = wa.Bottom - size - 24;
+                    pipOn = true;
+                }
+                else if (!on && pipOn)
+                {
+                    win.Topmost = false;
+                    win.WindowStyle = prevStyle;
+                    win.ResizeMode = prevResize;
+                    win.WindowState = prevState;
+                    win.Width = prevW; win.Height = prevH;
+                    win.Left = prevL; win.Top = prevT;
+                    pipOn = false;
+                }
+            }
+
             // ページからのメッセージ処理:
             //   "ready"                      → 初回スナップショット送信
             //   {"type":"interval","ms":N}   → 更新間隔を変更
+            //   {"type":"pip","on":bool}     → 正方形(PiP)モードの切替
             core.WebMessageReceived += (_, e) =>
             {
                 string? msg = null;
@@ -95,10 +146,28 @@ internal static class Program
                     {
                         using var doc = System.Text.Json.JsonDocument.Parse(msg);
                         var root = doc.RootElement;
-                        if (root.TryGetProperty("type", out var t) && t.GetString() == "interval"
+                        var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
+                        if (type == "interval"
                             && root.TryGetProperty("ms", out var m) && m.TryGetInt32(out var ms))
                         {
                             stats.SetInterval(ms);
+                        }
+                        else if (type == "pip" && root.TryGetProperty("on", out var o))
+                        {
+                            SetPip(o.ValueKind == System.Text.Json.JsonValueKind.True);
+                        }
+                        else if (type == "drag" && pipOn)
+                        {
+                            // フチなしPiPでもウィンドウを掴んで移動できるようにする。
+                            // WebView2 上ではマウス入力が WebView2 の HWND に渡るため WPF の
+                            // win.DragMove() は「左ボタン押下中」と判定できず効かない。
+                            // OS のウィンドウ移動ループを直接起動するため WM_NCLBUTTONDOWN を送る。
+                            var hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+                            if (hwnd != IntPtr.Zero)
+                            {
+                                ReleaseCapture();
+                                SendMessage(hwnd, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+                            }
                         }
                     }
                     catch { /* 不正なメッセージは無視 */ }

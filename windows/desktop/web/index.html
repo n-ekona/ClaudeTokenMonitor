@@ -78,6 +78,65 @@
   .hm-legend { display:flex; align-items:center; gap:4px; margin-top:10px; font-size:11px; color:var(--muted); }
   .hm-legend i { width:11px; height:11px; border-radius:2px; display:inline-block; }
   .hm-legend i.l0{background:#161b22}.hm-legend i.l1{background:#0e4429}.hm-legend i.l2{background:#006d32}.hm-legend i.l3{background:#26a641}.hm-legend i.l4{background:#39d353}
+
+  /* ---- PiP（正方形）モード ------------------------------------------------ */
+  .pip-toggle {
+    background: var(--panel2); border:1px solid var(--line); color: var(--text);
+    border-radius:8px; padding:5px 10px; font-size:14px; cursor:pointer; line-height:1;
+  }
+  .pip-toggle:hover { border-color: var(--accent); }
+  #pipView { display:none; }
+  body.pip { overflow:hidden; background:#0b0f14; }
+  body.pip header, body.pip main { display:none; }
+  body.pip #pipView {
+    display:block; position:fixed; inset:0; cursor:move;
+    background: radial-gradient(120% 120% at 50% 35%, #141b24 0%, #0b0f14 100%);
+  }
+  /* 背景チャート層（薄く敷く・操作は透過） */
+  #pipView .pip-bg { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+  #pipView .pip-donut-wrap {
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-58%);
+    width:240px; height:240px; opacity:.30;
+  }
+  #pipView .pip-bars-wrap {
+    position:absolute; left:8px; right:8px; bottom:8px; height:92px; opacity:.26;
+  }
+  /* 前景（数値）層 */
+  #pipView .pip-fg {
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    justify-content:center; align-items:center; text-align:center; padding:14px 16px;
+    pointer-events:none; /* ドラッグ優先。クリック可能要素のみ個別に有効化 */
+  }
+  #pipView .pip-exit {
+    position:absolute; top:8px; right:8px; z-index:3; pointer-events:auto; cursor:pointer;
+    background:rgba(20,27,36,.6); border:1px solid var(--line); color:var(--muted);
+    border-radius:6px; width:26px; height:26px; font-size:13px; line-height:1;
+  }
+  #pipView .pip-exit:hover { color:var(--text); border-color:var(--accent); }
+  #pipView .pip-status { font-size:11px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+  #pipView .pip-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-top:4px; }
+  #pipView .pip-m { color:var(--accent2); font-weight:700; font-variant-numeric:tabular-nums; margin-left:4px; }
+  /* 左上の草（過去7日アクティビティ）。背景チャートより手前に出す */
+  #pipView .pip-grass {
+    position:absolute; top:9px; left:10px; z-index:2; pointer-events:none;
+    display:flex; align-items:center; gap:5px;
+  }
+  #pipView .pip-grass-lbl { font-size:9px; color:var(--muted); letter-spacing:.04em; }
+  #pipView .pip-grass-cells { display:flex; gap:3px; }
+  #pipView .pip-grass-cells i {
+    width:12px; height:12px; border-radius:2px; display:block;
+    outline:1px solid rgba(255,255,255,.06);
+  }
+  #pipView .pip-tokens {
+    font-size:clamp(18px,7vw,27px); font-weight:800; font-variant-numeric:tabular-nums;
+    line-height:1.1; color:var(--text); text-shadow:0 2px 12px rgba(0,0,0,.6);
+    white-space:nowrap;
+  }
+  #pipView .pip-cost {
+    font-size:clamp(20px,7vw,30px); font-weight:700; color:var(--accent);
+    font-variant-numeric:tabular-nums; margin-top:10px; text-shadow:0 2px 12px rgba(0,0,0,.6);
+  }
+  #pipView .pip-cost-jpy { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -91,8 +150,29 @@
     <label>1ドル=</label><input id="rate" type="number" value="155" min="1" step="0.01" /><label>円</label>
     <label class="chk"><input id="rateAuto" type="checkbox" checked />自動</label>
     <span class="meta" id="rateInfo"></span>
+    <span class="sep"></span>
+    <button id="pipBtn" class="pip-toggle" title="正方形モード（ピクチャインピクチャ）">⛶ PiP</button>
   </div>
 </header>
+
+<!-- 正方形（PiP）モードの表示。body.pip のときだけ表示される -->
+<div id="pipView">
+  <!-- 背景: モデル別の円グラフ＋プロジェクト別の帯グラフ（薄く敷く） -->
+  <div class="pip-bg">
+    <div class="pip-donut-wrap"><canvas id="pipDonut"></canvas></div>
+    <div class="pip-bars-wrap"><canvas id="pipBars"></canvas></div>
+  </div>
+  <button class="pip-exit" id="pipExit" title="通常表示に戻す">⤢</button>
+  <!-- 左上に過去7日のアクティビティ（草）を前景表示 -->
+  <div class="pip-grass" id="pipGrass"><span class="pip-grass-lbl">7日</span><span class="pip-grass-cells" id="pipGrassCells"></span></div>
+  <div class="pip-fg">
+    <div class="pip-status"><span id="pipDot" class="dot"></span><span id="pipStatus">待機中…</span></div>
+    <div class="pip-tokens" id="pipTokens">–</div>
+    <div class="pip-label">総トークン <span class="pip-m" id="pipTokensM"></span></div>
+    <div class="pip-cost" id="pipCost">–</div>
+    <div class="pip-cost-jpy" id="pipCostJpy"></div>
+  </div>
+</div>
 <main>
   <div class="cards">
     <div class="card">
@@ -287,6 +367,19 @@ function animate(){
       const jpy = document.getElementById('totalCostJpy');
       if (jpy) jpy.textContent = jpyRate ? `≈ ${fmtJpy(tw.cur * jpyRate)}` : '';
     }
+    // PiP（正方形）モードのカウンタも同じ tween で滑らかに追従
+    if (k === 'tokens'){
+      const p = document.getElementById('pipTokens');
+      if (p) p.textContent = fmt(tw.cur);          // 主表示: 省略せず実数（カンマ区切り）
+      const pm = document.getElementById('pipTokensM');
+      if (pm) pm.textContent = '≈ ' + compact(tw.cur); // 副表示: 小さく省略形（~M）
+    }
+    if (k === 'cost'){
+      const pc = document.getElementById('pipCost');
+      if (pc) pc.textContent = fmtUsd(tw.cur);
+      const pj = document.getElementById('pipCostJpy');
+      if (pj) pj.textContent = jpyRate ? `≈ ${fmtJpy(tw.cur * jpyRate)}` : '';
+    }
   }
   requestAnimationFrame(animate);
 }
@@ -422,6 +515,89 @@ function renderTimeline(d){
   renderDailyChart(days);
   renderHeatmap(days);
 }
+
+// ---- PiP（正方形）モードの背景チャート ----------------------------------
+// 円グラフ＝モデル別トークン、帯グラフ（横棒）＝プロジェクト別トークン。
+// 数値の後ろに薄く敷いて「良い感じ」の背景にする。
+let pipDonut = null, pipBars = null;
+function renderPipGrass(days){
+  const host = document.getElementById('pipGrassCells');
+  if (!host) return;
+  if (!days || !days.length){ host.innerHTML = ''; return; }
+  // 本体の草と同じく全期間の四分位でレベル分けし、直近7日を色付け
+  const vals = days.map(d => d.tokens).filter(v => v > 0).sort((a,b)=>a-b);
+  const q = (p) => vals.length ? vals[Math.floor((vals.length-1)*p)] : 0;
+  const q1 = q(.25), q2 = q(.5), q3 = q(.75);
+  const lvl = (v) => v<=0?0 : v<=q1?1 : v<=q2?2 : v<=q3?3 : 4;
+  const last7 = days.slice(-7);
+  host.innerHTML = last7.map(d =>
+    `<i style="background:${HM_COLORS[lvl(d.tokens)]}" title="${d.date}: ${fmt(d.tokens)} トークン"></i>`).join('');
+}
+
+function renderPipCharts(d){
+  if (!d) return;
+  renderPipGrass(d.daily || []);
+  const donutCv = document.getElementById('pipDonut');
+  const barsCv  = document.getElementById('pipBars');
+  if (!donutCv || !barsCv) return;
+
+  // 円グラフ: モデル別
+  const mLabels = d.models.map(m => m.name);
+  const mData   = d.models.map(m => m.tokens);
+  if (!pipDonut){
+    pipDonut = new Chart(donutCv, {
+      type:'doughnut',
+      data:{ labels:mLabels, datasets:[{ data:mData, backgroundColor:COLORS, borderColor:'#0b0f14', borderWidth:2 }] },
+      options:{ animation:{duration:400}, responsive:true, maintainAspectRatio:false, cutout:'58%',
+        plugins:{ legend:{display:false}, tooltip:{enabled:false} } }
+    });
+  } else {
+    pipDonut.data.labels = mLabels;
+    pipDonut.data.datasets[0].data = mData;
+    pipDonut.update();
+  }
+
+  // 帯グラフ（横棒）: プロジェクト別 上位
+  const projTop = d.projects.slice(0, 6);
+  const pLabels = projTop.map(p => p.name);
+  const pData   = projTop.map(p => p.tokens);
+  if (!pipBars){
+    pipBars = new Chart(barsCv, {
+      type:'bar',
+      data:{ labels:pLabels, datasets:[{ data:pData, backgroundColor:'#6ba8d9', borderRadius:3 }] },
+      options:{ animation:{duration:400}, responsive:true, maintainAspectRatio:false, indexAxis:'y',
+        plugins:{ legend:{display:false}, tooltip:{enabled:false} },
+        scales:{ x:{display:false, beginAtZero:true}, y:{display:false} } }
+    });
+  } else {
+    pipBars.data.labels = pLabels;
+    pipBars.data.datasets[0].data = pData;
+    pipBars.update();
+  }
+}
+
+// ---- PiP（正方形）モードの切替 ------------------------------------------
+function setPip(on){
+  document.body.classList.toggle('pip', on);
+  // C#（WebView2）側へウィンドウのリサイズ/最前面化/フチ消しを依頼
+  if (window.chrome && window.chrome.webview){
+    window.chrome.webview.postMessage(JSON.stringify({ type:'pip', on: !!on }));
+  }
+  // 表示直後に最新データで背景チャートを描画（responsive:false なので要明示更新）
+  if (on && lastData) requestAnimationFrame(() => renderPipCharts(lastData));
+  try { localStorage.setItem('pipMode', on ? '1' : '0'); } catch (_) {}
+}
+document.getElementById('pipBtn').addEventListener('click', () => setPip(!document.body.classList.contains('pip')));
+document.getElementById('pipExit').addEventListener('click', (e) => { e.stopPropagation(); setPip(false); });
+
+// フチなしPiPでもウィンドウを掴んで動かせるように、空き領域のドラッグを C# へ通知
+document.getElementById('pipView').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  if (e.target.closest('.pip-exit')) return; // 終了ボタンはドラッグ対象外
+  if (window.chrome && window.chrome.webview){
+    window.chrome.webview.postMessage(JSON.stringify({ type:'drag' }));
+  }
+});
 document.getElementById('dayRange').addEventListener('change', () => { if (lastData) renderDailyChart(lastData.daily || []); });
 
 // ---- 描画 ----------------------------------------------------------------
@@ -465,6 +641,9 @@ function render(d){
   // 時系列グラフ & 草
   renderTimeline(d);
 
+  // PiP表示中なら背景チャート（円/帯）も更新
+  if (document.body.classList.contains('pip')) renderPipCharts(d);
+
   // テーブル
   document.getElementById('modelTable').innerHTML = d.models.map(m => `
     <tr>
@@ -500,13 +679,19 @@ function render(d){
 function updateStatus(lastActivity){
   const dot = document.getElementById('statusDot');
   const status = document.getElementById('status');
-  if (!lastActivity){ status.textContent = 'データ待機中'; dot.classList.add('stale'); return; }
+  const pipDot = document.getElementById('pipDot');
+  const pipStatus = document.getElementById('pipStatus');
+  const set = (txt, stale) => {
+    status.textContent = txt; dot.classList.toggle('stale', stale);
+    if (pipStatus) pipStatus.textContent = txt;
+    if (pipDot) pipDot.classList.toggle('stale', stale);
+  };
+  if (!lastActivity){ set('データ待機中', true); return; }
   const ago = Date.now() - new Date(lastActivity).getTime();
   const mins = Math.floor(ago / 60000);
-  dot.classList.toggle('stale', mins > 5);
-  if (mins < 1) status.textContent = '最終アクティビティ: たった今';
-  else if (mins < 60) status.textContent = `最終アクティビティ: ${mins}分前`;
-  else status.textContent = `最終アクティビティ: ${Math.floor(mins/60)}時間前`;
+  if (mins < 1) set('たった今', false);
+  else if (mins < 60) set(`${mins}分前`, mins > 5);
+  else set(`${Math.floor(mins/60)}時間前`, true);
 }
 
 initCharts();
