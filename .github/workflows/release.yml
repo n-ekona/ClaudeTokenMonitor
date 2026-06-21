@@ -83,11 +83,8 @@ jobs:
           path: windows/desktop/artifacts/*.zip
 
   # ---- macOS (Swift + WKWebView, universal) ----
-  # NOTE: v1.2.0 は Windows のみリリース。再有効化するには if:false を外し、
-  #       release ジョブの needs に macos を戻す。
   macos:
     needs: version
-    if: false
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,11 +111,8 @@ jobs:
           path: ClaudeTokenMonitor-*-mac-x64.zip
 
   # ---- Linux (C + GTK3 + WebKitGTK) — distro ごとに per-distro binary zip ----
-  # NOTE: v1.2.0 は Windows のみリリース。再有効化するには if:false を外し、
-  #       release ジョブの needs に linux を戻す。
   linux:
     needs: version
-    if: false
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -176,7 +170,7 @@ jobs:
 
   # ---- 成果物を集約して GitHub Release を作成（tag push 時のみ） ----
   release:
-    needs: [version, windows]
+    needs: [version, windows, macos, linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -196,7 +190,8 @@ jobs:
           body: |
             ## Claude Code トークン監視 ${{ github.ref_name }}
 
-            今回は **Windows 版のみ**のリリースです（.NET 9 + WebView2）。
+            Windows / macOS / Linux 用ネイティブアプリ。いずれも同じダッシュボード UI を、
+            各 OS ネイティブの WebView（WebView2 / WKWebView / WebKitGTK）で表示します。
 
             ### 新機能（v1.3.0）
 
@@ -210,7 +205,7 @@ jobs:
               常に最前面・ドラッグで移動でき、背景にモデル別の円グラフ＋プロジェクト別の帯グラフ、
               左上に直近7日のアクティビティ（草）、中央に総トークン（実数）と推定コストを表示します。
 
-            ### ダウンロード（Windows / x64）
+            ### Windows（.NET 9 + WebView2）
 
             | ファイル | 説明 |
             |---|---|
@@ -218,3 +213,24 @@ jobs:
             | `ClaudeTokenMonitor-*-win-x64.zip` | 軽量版。別途 [.NET 9 ランタイム](https://dotnet.microsoft.com/download/dotnet/9.0) が必要。 |
 
             > いずれも Microsoft Edge WebView2 ランタイムが必要です（Windows 11 は標準搭載）。
+
+            ### macOS（Swift + WKWebView）
+
+            | ファイル | 説明 |
+            |---|---|
+            | `ClaudeTokenMonitor-*-mac-x64.zip` | **ユニバーサルバイナリ**（Intel / Apple Silicon 両対応）。展開して `ClaudeTokenMonitor.app` を実行。 |
+
+            > 追加ランタイムは不要です（WKWebView は macOS 標準・macOS 11 以降）。
+
+            ### Linux（C + GTK3 + WebKitGTK）
+
+            ディストリごとにビルドした動的リンク版です。お使いの系統に合うものを選んでください。
+
+            | ファイル | 対象 |
+            |---|---|
+            | `ClaudeTokenMonitor-*-linux-ubuntu-x86_64.zip` | Ubuntu 24.04 / Debian 系 |
+            | `ClaudeTokenMonitor-*-linux-almalinux9-x86_64.zip` | AlmaLinux 9 / RHEL 系 |
+            | `ClaudeTokenMonitor-*-linux-archlinux-x86_64.zip` | Arch Linux 系 |
+
+            > 実行には GTK3 / WebKitGTK 4.1 / json-glib のランタイムが必要です（例: Ubuntu は
+            > `sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libjson-glib-1.0-0`）。
