@@ -40,6 +40,7 @@ public sealed class Stats
     };
 
     public string ProjectsDir { get; }
+    private readonly string _homeDir;  // displayPath の ~ 短縮基準(ProjectsDir 上書きと無関係に実 home)
     public event Action? Changed;
 
     private readonly object _lock = new();
@@ -47,6 +48,9 @@ public sealed class Stats
     private readonly Dictionary<string, Bucket> _byModel = new();
     private readonly Dictionary<string, Bucket> _byProject = new();
     private readonly Dictionary<string, Bucket> _byDay = new(); // "yyyy-MM-dd"(ローカル日付) -> bucket
+    // フォルダ(プロジェクトキー) -> 真のルート cwd / それが encode(cwd)==folder か。移動統合用。
+    private readonly Dictionary<string, string> _byProjectCanonical = new();
+    private readonly Dictionary<string, bool> _byProjectCanonicalMatch = new();
     private readonly HashSet<string> _seenIds = new();
     private readonly Dictionary<string, long> _offsets = new();
     private string? _lastActivity;
@@ -57,13 +61,65 @@ public sealed class Stats
 
     public Stats()
     {
+        _homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         ProjectsDir = Environment.GetEnvironmentVariable("CLAUDE_PROJECTS_DIR")
-            ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".claude", "projects");
+            ?? Path.Combine(_homeDir, ".claude", "projects");
 
         var ms = Environment.GetEnvironmentVariable("REFRESH_INTERVAL_MS");
         _intervalMs = int.TryParse(ms, out var v) ? Math.Clamp(v, 500, 600000) : 3000;
+    }
+
+    // Claude Code がフォルダ名生成に使う規則: 英数字(ASCII)以外をすべて '-' に。
+    private static string EncodePath(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (var ch in s)
+        {
+            bool alnum = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+            sb.Append(alnum ? ch : '-');
+        }
+        return sb.ToString();
+    }
+
+    private static string BaseName(string path)
+    {
+        var p = path.TrimEnd('/', '\\');
+        int i = p.LastIndexOfAny(new[] { '/', '\\' });
+        return i >= 0 ? p.Substring(i + 1) : p;
+    }
+
+    // home 配下なら接頭辞を ~ に短縮。
+    private string DisplayPath(string path)
+    {
+        if (path == _homeDir) return "~";
+        if (path.StartsWith(_homeDir + "/", StringComparison.Ordinal)) return "~" + path.Substring(_homeDir.Length);
+        if (path.StartsWith(_homeDir + "\\", StringComparison.Ordinal)) return "~" + path.Substring(_homeDir.Length);
+        return path;
+    }
+
+    private string CanonicalOf(string folder)
+        => _byProjectCanonical.TryGetValue(folder, out var c) ? c : folder;
+
+    // フォルダの「真のルート cwd」を順序非依存に更新(encode 一致を優先、同条件は辞書順最小)。
+    private void UpdateCanonical(string project, string cwd)
+    {
+        bool matches = EncodePath(cwd) == project;
+        if (!_byProjectCanonical.TryGetValue(project, out var cur))
+        {
+            _byProjectCanonical[project] = cwd;
+            _byProjectCanonicalMatch[project] = matches;
+            return;
+        }
+        bool curMatch = _byProjectCanonicalMatch.TryGetValue(project, out var cm) && cm;
+        if (matches && !curMatch)
+        {
+            _byProjectCanonical[project] = cwd;
+            _byProjectCanonicalMatch[project] = true;
+        }
+        else if (matches == curMatch && string.CompareOrdinal(cwd, cur) < 0)
+        {
+            _byProjectCanonical[project] = cwd;
+        }
     }
 
     private static (double inP, double outP) PriceFor(string model)
@@ -201,6 +257,14 @@ public sealed class Stats
         {
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return false;
+
+            // フォルダ識別用の cwd は、集計可否・dedup と独立に(全 early return より前で)捕捉する。
+            if (root.TryGetProperty("cwd", out var cwdEl) && cwdEl.ValueKind == JsonValueKind.String)
+            {
+                var cwd = cwdEl.GetString();
+                if (!string.IsNullOrEmpty(cwd)) UpdateCanonical(project, cwd);
+            }
+
             if (!root.TryGetProperty("type", out var typeEl) || typeEl.GetString() != "assistant") return false;
             if (!root.TryGetProperty("message", out var msg) || msg.ValueKind != JsonValueKind.Object) return false;
             if (!msg.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object) return false;
@@ -289,10 +353,7 @@ public sealed class Stats
                 .Select(kv => kv.Value.ToDto(kv.Key))
                 .OrderByDescending(d => d.Tokens)
                 .ToList();
-            var projects = _byProject
-                .Select(kv => kv.Value.ToDto(kv.Key))
-                .OrderByDescending(d => d.Tokens)
-                .ToList();
+            var projects = MergedProjects();
 
             var snap = new
             {
@@ -308,6 +369,62 @@ public sealed class Stats
             };
             return JsonSerializer.Serialize(snap, JsonOpts);
         }
+    }
+
+    private static void AddBucket(Bucket acc, Bucket b)
+    {
+        acc.Input += b.Input;
+        acc.Output += b.Output;
+        acc.CacheWrite5m += b.CacheWrite5m;
+        acc.CacheWrite1h += b.CacheWrite1h;
+        acc.CacheRead += b.CacheRead;
+        acc.Cost += b.Cost;
+        acc.Messages += b.Messages;
+    }
+
+    // basename(真のルート) でグルーピングし、移動(存在1+消滅n)だけを1行へ統合する。呼び出しは _lock 内で。
+    private List<BucketDto> MergedProjects()
+    {
+        var existsCache = new Dictionary<string, bool>();
+        bool DirExists(string path)
+        {
+            if (existsCache.TryGetValue(path, out var c)) return c;
+            var r = Directory.Exists(path);
+            existsCache[path] = r;
+            return r;
+        }
+
+        var groups = new Dictionary<string, List<string>>();
+        foreach (var folder in _byProject.Keys)
+        {
+            var key = BaseName(CanonicalOf(folder));
+            if (!groups.TryGetValue(key, out var lst)) { lst = new List<string>(); groups[key] = lst; }
+            lst.Add(folder);
+        }
+
+        var rows = new List<(string name, Bucket b)>();
+        foreach (var folders in groups.Values)
+        {
+            var existing = folders.Where(f => DirExists(CanonicalOf(f))).ToList();
+            var gone = folders.Where(f => !DirExists(CanonicalOf(f))).ToList();
+            if (existing.Count == 1 && gone.Count >= 1)
+            {
+                var target = existing[0];
+                var merged = new Bucket();
+                foreach (var f in folders) AddBucket(merged, _byProject[f]);
+                rows.Add((DisplayPath(CanonicalOf(target)), merged));
+            }
+            else
+            {
+                foreach (var f in folders)
+                    rows.Add((DisplayPath(CanonicalOf(f)), _byProject[f]));
+            }
+        }
+
+        return rows
+            .OrderByDescending(r => r.b.Input + r.b.Output + r.b.CacheWrite5m + r.b.CacheWrite1h + r.b.CacheRead)
+            .Select(r => r.b.ToDto(r.name))
+            .ToList();
     }
 
     // 直近 days 日分の日別系列（データの無い日も0埋め、古い→新しい順）。呼び出しは _lock 内で。
