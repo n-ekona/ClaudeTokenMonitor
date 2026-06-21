@@ -38,12 +38,16 @@ typedef struct {
 
 struct _Stats {
     char *projects_dir;
+    char *home_dir;          // displayPath の ~ 短縮基準(projects_dir 上書きと無関係に実 home)
     int interval_ms;
 
     Bucket total;
     GHashTable *by_model;    // char* -> Bucket*
     GHashTable *by_project;  // char* -> Bucket*
     GHashTable *by_day;      // "yyyy-MM-dd" -> Bucket*
+    // フォルダ(プロジェクトキー) -> 真のルート cwd / それが encode(cwd)==folder か。移動統合用。
+    GHashTable *by_project_canonical;        // char* folder -> char* cwd
+    GHashTable *by_project_canonical_match;  // char* folder -> gboolean(GINT_TO_POINTER)
     GHashTable *seen_ids;    // set of char*
     GHashTable *offsets;     // char* path -> gint64*
     char *last_activity;
@@ -78,11 +82,12 @@ static char *iso_now(void) {
 Stats *stats_new(void) {
     Stats *s = g_new0(Stats, 1);
 
+    s->home_dir = g_strdup(g_get_home_dir());
     const char *dir = g_getenv("CLAUDE_PROJECTS_DIR");
     if (dir && *dir) {
         s->projects_dir = g_strdup(dir);
     } else {
-        s->projects_dir = g_build_filename(g_get_home_dir(), ".claude", "projects", NULL);
+        s->projects_dir = g_build_filename(s->home_dir, ".claude", "projects", NULL);
     }
 
     const char *ms = g_getenv("REFRESH_INTERVAL_MS");
@@ -92,6 +97,8 @@ Stats *stats_new(void) {
     s->by_model = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     s->by_project = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     s->by_day = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    s->by_project_canonical = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    s->by_project_canonical_match = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     s->seen_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     s->offsets = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     s->started_at = iso_now();
@@ -103,9 +110,12 @@ void stats_free(Stats *s) {
     g_hash_table_destroy(s->by_model);
     g_hash_table_destroy(s->by_project);
     g_hash_table_destroy(s->by_day);
+    g_hash_table_destroy(s->by_project_canonical);
+    g_hash_table_destroy(s->by_project_canonical_match);
     g_hash_table_destroy(s->seen_ids);
     g_hash_table_destroy(s->offsets);
     g_free(s->projects_dir);
+    g_free(s->home_dir);
     g_free(s->last_activity);
     g_free(s->started_at);
     g_free(s);
@@ -158,6 +168,68 @@ static char *local_day_key(const char *ts) {
     return g_strdup(buf);
 }
 
+// Claude Code がフォルダ名生成に使う規則: 英数字(ASCII)以外をすべて '-' に。
+static char *encode_path(const char *s) {
+    GString *out = g_string_sized_new(strlen(s));
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        gboolean alnum = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+        g_string_append_c(out, alnum ? (char)c : '-');
+    }
+    return g_string_free(out, FALSE);
+}
+
+// 末尾 '/' を除いた最後の要素を新規確保で返す。
+static char *base_name_dup(const char *path) {
+    gsize len = strlen(path);
+    while (len > 0 && path[len - 1] == '/') len--;
+    gsize start = 0;
+    for (gsize i = 0; i < len; i++) if (path[i] == '/') start = i + 1;
+    return g_strndup(path + start, len - start);
+}
+
+// home 配下なら接頭辞を ~ に短縮。新規確保で返す。
+static char *display_path(Stats *s, const char *path) {
+    const char *home = s->home_dir;
+    if (home) {
+        gsize hl = strlen(home);
+        if (strcmp(path, home) == 0) return g_strdup("~");
+        if (strncmp(path, home, hl) == 0 && path[hl] == '/')
+            return g_strdup_printf("~%s", path + hl);
+    }
+    return g_strdup(path);
+}
+
+static gboolean dir_exists(const char *path) {
+    return g_file_test(path, G_FILE_TEST_IS_DIR);
+}
+
+static const char *canonical_of(Stats *s, const char *folder) {
+    const char *c = g_hash_table_lookup(s->by_project_canonical, folder);
+    return c ? c : folder;
+}
+
+// フォルダの「真のルート cwd」を順序非依存に更新(encode 一致を優先、同条件は辞書順最小)。
+static void update_canonical(Stats *s, const char *project, const char *cwd) {
+    char *enc = encode_path(cwd);
+    gboolean matches = (g_strcmp0(enc, project) == 0);
+    g_free(enc);
+
+    const char *cur = g_hash_table_lookup(s->by_project_canonical, project);
+    if (!cur) {
+        g_hash_table_insert(s->by_project_canonical, g_strdup(project), g_strdup(cwd));
+        g_hash_table_insert(s->by_project_canonical_match, g_strdup(project), GINT_TO_POINTER(matches ? 1 : 0));
+        return;
+    }
+    gboolean cur_match = GPOINTER_TO_INT(g_hash_table_lookup(s->by_project_canonical_match, project)) != 0;
+    if (matches && !cur_match) {
+        g_hash_table_insert(s->by_project_canonical, g_strdup(project), g_strdup(cwd));
+        g_hash_table_insert(s->by_project_canonical_match, g_strdup(project), GINT_TO_POINTER(1));
+    } else if (matches == cur_match && strcmp(cwd, cur) < 0) {
+        g_hash_table_insert(s->by_project_canonical, g_strdup(project), g_strdup(cwd));
+    }
+}
+
 // 1行(JSONL)を処理。集計に反映したら TRUE。
 static gboolean process_line(Stats *s, const char *line, const char *project) {
     if (!line || !*line) return FALSE;
@@ -172,6 +244,10 @@ static gboolean process_line(Stats *s, const char *line, const char *project) {
     gboolean ret = FALSE;
     if (!root_node || !JSON_NODE_HOLDS_OBJECT(root_node)) goto done;
     JsonObject *root = json_node_get_object(root_node);
+
+    // フォルダ識別用の cwd は、集計可否・dedup と独立に(全 early return より前で)捕捉する。
+    const char *cwd = json_object_get_string_member_with_default(root, "cwd", NULL);
+    if (cwd && *cwd) update_canonical(s, project, cwd);
 
     if (g_strcmp0(json_object_get_string_member_with_default(root, "type", ""), "assistant") != 0) goto done;
     if (!json_object_has_member(root, "message")) goto done;
@@ -370,6 +446,96 @@ static void add_sorted_map(JsonBuilder *b, GHashTable *map) {
     g_ptr_array_free(arr, TRUE);
 }
 
+// ---- プロジェクト統合(移動検知) ----------------------------------------
+typedef struct { char *name; Bucket b; } Row;
+
+static void bucket_add(Bucket *acc, const Bucket *bk) {
+    acc->input += bk->input; acc->output += bk->output;
+    acc->cw5 += bk->cw5; acc->cw1 += bk->cw1; acc->cread += bk->cread;
+    acc->cost += bk->cost; acc->messages += bk->messages;
+}
+
+static gint row_cmp_desc(gconstpointer a, gconstpointer b) {
+    const Row *x = *(const Row * const *)a;
+    const Row *y = *(const Row * const *)b;
+    gint64 tx = bucket_tokens(&x->b), ty = bucket_tokens(&y->b);
+    return (ty > tx) - (ty < tx); // tokens 降順
+}
+
+static void row_free(gpointer p) { Row *r = p; g_free(r->name); g_free(r); }
+
+// basename(真のルート) でグルーピングし、移動(存在1+消滅n)だけを1行へ統合する。
+static void add_merged_projects(JsonBuilder *b, Stats *s) {
+    // groups: basename(char*) -> GPtrArray<const char* folder>(借用)
+    GHashTable *groups = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                               (GDestroyNotify)g_ptr_array_unref);
+    GHashTableIter it; gpointer k, v;
+    g_hash_table_iter_init(&it, s->by_project);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        const char *folder = k;
+        char *base = base_name_dup(canonical_of(s, folder));
+        GPtrArray *arr = g_hash_table_lookup(groups, base);
+        if (!arr) { arr = g_ptr_array_new(); g_hash_table_insert(groups, base, arr); }
+        else g_free(base);
+        g_ptr_array_add(arr, (gpointer)folder);
+    }
+
+    GHashTable *exists = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    GPtrArray *rows = g_ptr_array_new_with_free_func(row_free);
+
+    g_hash_table_iter_init(&it, groups);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        GPtrArray *folders = v;
+        GPtrArray *existing = g_ptr_array_new();
+        guint gone = 0;
+        for (guint i = 0; i < folders->len; i++) {
+            const char *folder = g_ptr_array_index(folders, i);
+            const char *can = canonical_of(s, folder);
+            gpointer cached; gboolean ex;
+            if (g_hash_table_lookup_extended(exists, can, NULL, &cached)) {
+                ex = GPOINTER_TO_INT(cached) != 0;
+            } else {
+                ex = dir_exists(can);
+                g_hash_table_insert(exists, g_strdup(can), GINT_TO_POINTER(ex ? 1 : 0));
+            }
+            if (ex) g_ptr_array_add(existing, (gpointer)folder); else gone++;
+        }
+
+        if (existing->len == 1 && gone >= 1) {
+            const char *target = g_ptr_array_index(existing, 0);
+            Row *r = g_new0(Row, 1);
+            r->name = display_path(s, canonical_of(s, target));
+            for (guint i = 0; i < folders->len; i++) {
+                Bucket *bk = g_hash_table_lookup(s->by_project, g_ptr_array_index(folders, i));
+                if (bk) bucket_add(&r->b, bk);
+            }
+            g_ptr_array_add(rows, r);
+        } else {
+            for (guint i = 0; i < folders->len; i++) {
+                const char *folder = g_ptr_array_index(folders, i);
+                Bucket *bk = g_hash_table_lookup(s->by_project, folder);
+                Row *r = g_new0(Row, 1);
+                r->name = display_path(s, canonical_of(s, folder));
+                if (bk) r->b = *bk;
+                g_ptr_array_add(rows, r);
+            }
+        }
+        g_ptr_array_free(existing, TRUE);
+    }
+
+    g_ptr_array_sort(rows, row_cmp_desc);
+    json_builder_begin_array(b);
+    for (guint i = 0; i < rows->len; i++) {
+        Row *r = g_ptr_array_index(rows, i);
+        add_bucket(b, &r->b, r->name);
+    }
+    json_builder_end_array(b);
+
+    g_ptr_array_free(rows, TRUE);
+    g_hash_table_destroy(exists);
+    g_hash_table_destroy(groups);
+}
+
 // 直近 days 日分の日別系列（0埋め、古い→新しい順）
 static void add_daily(JsonBuilder *b, Stats *s, int days) {
     time_t now = time(NULL);
@@ -407,7 +573,7 @@ char *stats_snapshot_json(Stats *s) {
     add_sorted_map(b, s->by_model);
 
     json_builder_set_member_name(b, "projects");
-    add_sorted_map(b, s->by_project);
+    add_merged_projects(b, s);
 
     json_builder_set_member_name(b, "daily");
     add_daily(b, s, 371);

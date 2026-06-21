@@ -31,6 +31,7 @@ final class Stats {
     }
 
     let projectsDir: String
+    private let homeDir: String                    // displayPath の ~ 短縮基準(projectsDir 上書きと無関係に実 home)
     var onChanged: (() -> Void)?
 
     private let lock = NSLock()
@@ -38,6 +39,9 @@ final class Stats {
     private var byModel: [String: Bucket] = [:]
     private var byProject: [String: Bucket] = [:]
     private var byDay: [String: Bucket] = [:]      // "yyyy-MM-dd"(ローカル日付) -> bucket
+    // フォルダ(プロジェクトキー) -> 真のルート cwd と、それが encode(cwd)==folder か。移動統合用。
+    private var byProjectCanonical: [String: String] = [:]
+    private var byProjectCanonicalMatch: [String: Bool] = [:]
     private var seenIds = Set<String>()
     private var offsets: [String: Int] = [:]
     private var lastActivity: String?
@@ -54,11 +58,11 @@ final class Stats {
 
     init() {
         let env = ProcessInfo.processInfo.environment
+        homeDir = FileManager.default.homeDirectoryForCurrentUser.path
         if let dir = env["CLAUDE_PROJECTS_DIR"], !dir.isEmpty {
             projectsDir = dir
         } else {
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
-            projectsDir = (home as NSString).appendingPathComponent(".claude/projects")
+            projectsDir = (homeDir as NSString).appendingPathComponent(".claude/projects")
         }
         if let ms = env["REFRESH_INTERVAL_MS"], let v = Int(ms) {
             intervalMs = min(max(v, 500), 600000)
@@ -192,12 +196,60 @@ final class Stats {
         return rel
     }
 
+    // Claude Code がフォルダ名生成に使う規則: 英数字(ASCII)以外をすべて '-' に。
+    private static func encodePath(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.utf8.count)
+        for u in s.unicodeScalars {
+            let v = u.value
+            let isAlnum = (v >= 48 && v <= 57) || (v >= 65 && v <= 90) || (v >= 97 && v <= 122)
+            out.append(isAlnum ? Character(u) : "-")
+        }
+        return out
+    }
+
+    private static func baseName(_ path: String) -> String {
+        var p = Substring(path)
+        while p.hasSuffix("/") { p = p.dropLast() }
+        if let i = p.lastIndex(of: "/") { return String(p[p.index(after: i)...]) }
+        return String(p)
+    }
+
+    // home 配下なら接頭辞を ~ に短縮。
+    private func displayPath(_ path: String) -> String {
+        if path == homeDir { return "~" }
+        if path.hasPrefix(homeDir + "/") { return "~" + path.dropFirst(homeDir.count) }
+        return path
+    }
+
+    // フォルダの「真のルート cwd」を順序非依存に更新(encode 一致を優先、同条件は辞書順最小)。
+    private func updateCanonical(project: String, cwd: String) {
+        let matches = (Stats.encodePath(cwd) == project)
+        guard let cur = byProjectCanonical[project] else {
+            byProjectCanonical[project] = cwd
+            byProjectCanonicalMatch[project] = matches
+            return
+        }
+        let curMatch = byProjectCanonicalMatch[project] ?? false
+        if matches && !curMatch {
+            byProjectCanonical[project] = cwd
+            byProjectCanonicalMatch[project] = true
+        } else if matches == curMatch && cwd < cur {
+            byProjectCanonical[project] = cwd
+        }
+    }
+
     private func processLine(_ line: String, project: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return false }
         guard let lineData = line.data(using: .utf8),
               let root = (try? JSONSerialization.jsonObject(with: lineData)) as? [String: Any]
         else { return false }
+
+        // フォルダ識別用の cwd は、集計可否・dedup と独立に(全 early return より前で)捕捉する。
+        if let cwd = root["cwd"] as? String, !cwd.isEmpty {
+            updateCanonical(project: project, cwd: cwd)
+        }
 
         guard (root["type"] as? String) == "assistant" else { return false }
         guard let msg = root["message"] as? [String: Any] else { return false }
@@ -281,9 +333,7 @@ final class Stats {
         let models = byModel
             .map { dto($0.value, name: $0.key) }
             .sorted { ($0["tokens"] as! Int) > ($1["tokens"] as! Int) }
-        let projects = byProject
-            .map { dto($0.value, name: $0.key) }
-            .sorted { ($0["tokens"] as! Int) > ($1["tokens"] as! Int) }
+        let projects = mergedProjects()
 
         let snap: [String: Any] = [
             "total": dto(total, name: nil),
@@ -299,6 +349,54 @@ final class Stats {
         guard let data = try? JSONSerialization.data(withJSONObject: snap, options: []),
               let s = String(data: data, encoding: .utf8) else { return "{}" }
         return s
+    }
+
+    private func addBucket(_ acc: inout Bucket, _ b: Bucket) {
+        acc.input += b.input
+        acc.output += b.output
+        acc.cacheWrite5m += b.cacheWrite5m
+        acc.cacheWrite1h += b.cacheWrite1h
+        acc.cacheRead += b.cacheRead
+        acc.cost += b.cost
+        acc.messages += b.messages
+    }
+
+    // basename(真のルート) でグルーピングし、移動(存在1+消滅n)だけを1行へ統合する。呼び出しは lock 内。
+    private func mergedProjects() -> [[String: Any]] {
+        let fm = FileManager.default
+        func canonical(_ folder: String) -> String { byProjectCanonical[folder] ?? folder }
+        var existsCache: [String: Bool] = [:]
+        func dirExists(_ path: String) -> Bool {
+            if let c = existsCache[path] { return c }
+            var isDir: ObjCBool = false
+            let r = fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            existsCache[path] = r
+            return r
+        }
+
+        var groups: [String: [String]] = [:]
+        for folder in byProject.keys {
+            groups[Stats.baseName(canonical(folder)), default: []].append(folder)
+        }
+
+        var rows: [(name: String, bucket: Bucket)] = []
+        for (_, folders) in groups {
+            let existing = folders.filter { dirExists(canonical($0)) }
+            let gone = folders.filter { !dirExists(canonical($0)) }
+            if existing.count == 1 && gone.count >= 1 {
+                let target = existing[0]
+                var merged = Bucket()
+                for f in folders { if let b = byProject[f] { addBucket(&merged, b) } }
+                rows.append((displayPath(canonical(target)), merged))
+            } else {
+                for f in folders {
+                    if let b = byProject[f] { rows.append((displayPath(canonical(f)), b)) }
+                }
+            }
+        }
+        return rows
+            .sorted { $0.bucket.tokens > $1.bucket.tokens }
+            .map { dto($0.bucket, name: $0.name) }
     }
 
     private func dto(_ b: Bucket, name: String?) -> [String: Any] {
