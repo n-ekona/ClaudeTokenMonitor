@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- CSP: 外部送信は為替の2ホストのみ許可（connect-src）。script/style は file:// 配信(mac/linux)で
+     ローカル読込を壊さないよう敢えて制限せず、注入対策は JS 側の esc() で担保する（多層防御）。 -->
+<meta http-equiv="Content-Security-Policy" content="connect-src 'self' https://open.er-api.com https://api.exchangerate-api.com; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Claude Code トークン監視</title>
 <script src="chart.umd.min.js"></script>
 <script src="i18n.js"></script>
@@ -493,6 +496,14 @@
 const COLORS = ['#d97757','#6ba8d9','#5fb878','#c9a45c','#a978d9','#d96b9a','#5fc4c4','#9aa0aa'];
 let lastData = null;
 let intervalInitialized = false;
+
+// HTML エスケープ。バックエンド由来の文字列（モデル名 / プロジェクト名 / 単価キー等）を
+// innerHTML へ差し込む前に無害化する。プロジェクト名は実ディレクトリパス由来のため、
+// 記号を含み得る前提でエスケープする（Stored XSS 対策）。
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
 
 // ===== 多言語化（i18n）====================================================
 const LANGS = ['ja','en','zh-Hant','zh-Hans','ko','fr','es','de','pt','it','ru'];
@@ -1016,8 +1027,8 @@ document.getElementById('rescanBtn').addEventListener('click', () => {
 function renderPriceEditor(pricing){
   const list = (pricing && pricing.length) ? pricing : DEFAULT_PRICING;
   document.getElementById('priceBody').innerHTML = list.map((p, i) => `
-    <tr data-key="${p.key}">
-      <td>${p.key}</td>
+    <tr data-key="${esc(p.key)}">
+      <td>${esc(p.key)}</td>
       <td><input type="number" min="0" step="0.05" value="${p.in}" data-i="${i}" data-f="in" /></td>
       <td><input type="number" min="0" step="0.05" value="${p.out}" data-i="${i}" data-f="out" /></td>
     </tr>`).join('');
@@ -1276,7 +1287,7 @@ function renderPipGrass(days){
   const lvl = (v) => v<=0?0 : v<=q1?1 : v<=q2?2 : v<=q3?3 : 4;
   const last7 = days.slice(-7);
   host.innerHTML = last7.map(d =>
-    `<i style="background:${HM_COLORS[lvl(d.tokens)]}" title="${d.date}: ${fmt(d.tokens)}"></i>`).join('');
+    `<i style="background:${HM_COLORS[lvl(d.tokens)]}" title="${esc(d.date)}: ${fmt(d.tokens)}"></i>`).join('');
 }
 
 function renderPipCharts(d){
@@ -1376,7 +1387,7 @@ function render(d){
   modelChart.data.datasets[0].data = d.models.map(m => m.tokens);
   modelChart.update();
   document.getElementById('modelLegend').innerHTML = d.models.map((m,i) =>
-    `<span><i style="background:${COLORS[i%COLORS.length]}"></i>${m.name} (${compact(m.tokens)})</span>`).join('');
+    `<span><i style="background:${COLORS[i%COLORS.length]}"></i>${esc(m.name)} (${compact(m.tokens)})</span>`).join('');
 
   const projTop = d.projects.slice(0, 10);
   projectChart.data.labels = projTop.map(p => p.name);
@@ -1392,7 +1403,7 @@ function render(d){
   // テーブル
   document.getElementById('modelTable').innerHTML = d.models.map(m => `
     <tr>
-      <td class="name">${m.name}</td>
+      <td class="name">${esc(m.name)}</td>
       <td>${fmt(m.tokens)}</td>
       <td>${fmt(m.input)}</td>
       <td>${fmt(m.output)}</td>
@@ -1404,7 +1415,7 @@ function render(d){
 
   document.getElementById('projectTable').innerHTML = d.projects.map(p => `
     <tr>
-      <td class="name">${p.name}</td>
+      <td class="name">${esc(p.name)}</td>
       <td>${fmt(p.tokens)}</td>
       <td>${p.messages.toLocaleString('ja-JP')}</td>
       <td>${fmtUsd(p.cost)}</td>
