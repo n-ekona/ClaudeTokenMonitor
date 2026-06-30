@@ -73,9 +73,11 @@ static void pip_move_to_corner(GtkWindow *win, int size) {
 }
 
 // 正方形(PiP)モードの切替。on で装飾なし最前面の正方形へ、off で元へ戻す。
-static void set_pip(App *app, gboolean on, int size) {
+static void set_pip(App *app, gboolean on, int size, int opacity) {
     if (size < 240) size = 240;
     if (size > 520) size = 520;
+    if (opacity < 30) opacity = 30;
+    if (opacity > 100) opacity = 100;
     GtkWindow *win = GTK_WINDOW(app->win);
 
     if (on && !app->pip_on) {
@@ -100,6 +102,9 @@ static void set_pip(App *app, gboolean on, int size) {
         gtk_window_move(win, app->prev_x, app->prev_y);
         app->pip_on = FALSE;
     }
+
+    // PiP 中だけ窓の不透明度を反映。通常表示へ戻したら不透明(1.0)へ。
+    gtk_widget_set_opacity(GTK_WIDGET(win), app->pip_on ? (opacity / 100.0) : 1.0);
 }
 
 // フチなし PiP でもウィンドウを掴んで動かせるよう、OS のウィンドウ移動ループを起動。
@@ -154,7 +159,8 @@ static void on_message(WebKitUserContentManager *ucm, WebKitJavascriptResult *re
                     } else if (g_strcmp0(type, "pip") == 0 && json_object_has_member(o, "on")) {
                         gboolean on = json_object_get_boolean_member_with_default(o, "on", FALSE);
                         int size = (int)json_object_get_int_member_with_default(o, "size", 320);
-                        set_pip(app, on, size);
+                        int opacity = (int)json_object_get_int_member_with_default(o, "opacity", 100);
+                        set_pip(app, on, size, opacity);
                     } else if (g_strcmp0(type, "drag") == 0) {
                         if (app->pip_on) pip_begin_drag(app);
                     }

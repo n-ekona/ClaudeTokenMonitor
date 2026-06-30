@@ -9,7 +9,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     let stats: Stats
     weak var webView: WKWebView?
     // ウィンドウ操作は AppDelegate 側へ委譲（onChanged と同じパターン）。実体はメインスレッドで呼ぶ。
-    var onPip: ((Bool, Double) -> Void)?
+    var onPip: ((Bool, Double, Int) -> Void)?
     var onDrag: (() -> Void)?
     var onTheme: ((Bool) -> Void)?
 
@@ -48,11 +48,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             case "pip":
                 let on = (obj["on"] as? NSNumber)?.boolValue ?? false
                 let size = (obj["size"] as? NSNumber)?.doubleValue ?? 320
+                let opacity = (obj["opacity"] as? NSNumber)?.intValue ?? 100
                 let cb = onPip
-                DispatchQueue.main.async { cb?(on, size) }
+                DispatchQueue.main.async { cb?(on, size, opacity) }
             case "drag":
-                let cb = onDrag
-                DispatchQueue.main.async { cb?() }
+                // ドラッグは現在のマウスイベントを使うため main で同期実行する
+                // （async だと NSApp.currentEvent が失われ performDrag を呼べない）。
+                // 本ハンドラは WKScriptMessageHandler 仕様で既に main スレッド上で呼ばれる。
+                onDrag?()
             default:
                 break
             }
@@ -93,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var savedStyleMask: NSWindow.StyleMask = []
     private var savedLevel: NSWindow.Level = .normal
     private var savedMovableByBg = false
+    private var savedAlpha: CGFloat = 1.0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         bridge = Bridge(stats: stats)
@@ -128,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // ウィンドウ操作（テーマ/PiP/ドラッグ）を Bridge から委譲してもらう
         bridge.onTheme = { [weak self] dark in self?.applyTheme(dark) }
-        bridge.onPip = { [weak self] on, size in self?.setPip(on, size) }
+        bridge.onPip = { [weak self] on, size, opacity in self?.setPip(on, size, opacity) }
         bridge.onDrag = { [weak self] in self?.pipDrag() }
 
         // web フォルダの index.html を読み込む（バンドル Resources、無ければ実行ファイル隣）
@@ -147,18 +151,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // 正方形(PiP)モードの切替（Windows の SetPip と同等）。
-    private func setPip(_ on: Bool, _ size: Double) {
+    private func setPip(_ on: Bool, _ size: Double, _ opacity: Int) {
         var s = size
         if s < 240 { s = 240 }
         if s > 520 { s = 520 }
         let side = CGFloat(s)
+        let alpha = CGFloat(min(max(opacity, 30), 100)) / 100.0
 
         if on && !pipOn {
-            // 通常表示の復元用に現在のジオメトリ/スタイルを退避
+            // 通常表示の復元用に現在のジオメトリ/スタイル/不透明度を退避
             savedFrame = window.frame
             savedStyleMask = window.styleMask
             savedLevel = window.level
             savedMovableByBg = window.isMovableByWindowBackground
+            savedAlpha = window.alphaValue
 
             window.styleMask = .borderless            // タイトルバー/枠なしの正方形
             window.level = .floating                  // 常に最前面
@@ -170,14 +176,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 既に PiP 表示中にサイズだけ変わった場合は、その場でリサイズして配置し直す
             window.setFrame(pipFrame(side), display: true)
         } else if !on && pipOn {
-            // 退避したスタイル/レベル/ジオメトリ/可動性を復元
+            // 退避したスタイル/レベル/ジオメトリ/可動性/不透明度を復元
             window.styleMask = savedStyleMask
             window.level = savedLevel
             window.isMovableByWindowBackground = savedMovableByBg
             window.setFrame(savedFrame, display: true)
+            window.alphaValue = savedAlpha
             window.makeKeyAndOrderFront(nil)
             pipOn = false
         }
+
+        // PiP 中だけ不透明度を反映（通常表示へ戻したら savedAlpha で復元済み）。
+        if pipOn { window.alphaValue = alpha }
     }
 
     // visibleFrame（メニューバー/Dock を除く作業領域）の右下隅へ、24pt のマージンで配置する正方形。
@@ -189,10 +199,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return NSRect(x: vf.maxX - side - margin, y: vf.minY + margin, width: side, height: side)
     }
 
-    // PiP のドラッグ。borderless + isMovableByWindowBackground=true により背景ドラッグで
-    // 動くため、ここでは何もしない。WKScriptMessage 経由では発火元の NSEvent が無く
-    // window.performDrag(with:) を呼べない（イベント無しでは不可）ため no-op とする。
-    private func pipDrag() {}
+    // PiP のドラッグ。borderless + isMovableByWindowBackground=true により背景ドラッグでも
+    // 動くが、JS の pointerdown 起点で即ドラッグを開始できるよう、現在のマウスイベントが
+    // 取れる場合は performDrag を呼ぶ。取れない場合は背景ドラッグに委ねる（安全側）。
+    private func pipDrag() {
+        guard pipOn else { return }
+        if let ev = NSApp.currentEvent,
+           ev.type == .leftMouseDown || ev.type == .leftMouseDragged {
+            window.performDrag(with: ev)
+        }
+    }
 
     func windowWillClose(_ notification: Notification) {
         stats.stop()

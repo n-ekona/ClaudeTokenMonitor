@@ -361,6 +361,10 @@
               <span data-i18n="set.pip.opacity">背景チャートの濃さ</span>
               <input id="pipOpacity" type="range" min="0" max="100" value="30" />
             </div>
+            <div class="set-row">
+              <span data-i18n="set.pip.winOpacity">ウィンドウの不透明度</span>
+              <input id="pipWinOpacity" type="range" min="50" max="100" value="100" />
+            </div>
           </div>
         </section>
 
@@ -981,6 +985,8 @@ function loadUiSettings(){
   const po = parseInt(get('pipOpacity', '30'), 10);
   document.getElementById('pipOpacity').value = isFinite(po) ? po : 30;
   document.documentElement.style.setProperty('--pip-bg-opacity', String((isFinite(po)?po:30)/100));
+  const pwo = parseInt(get('pipWinOpacity', '100'), 10);
+  document.getElementById('pipWinOpacity').value = isFinite(pwo) ? pwo : 100;
 }
 
 document.getElementById('langSel').addEventListener('change', (e) => setLang(e.target.value));
@@ -1012,6 +1018,14 @@ document.getElementById('pipOpacity').addEventListener('input', (e) => {
   const v = parseInt(e.target.value, 10) || 0;
   document.documentElement.style.setProperty('--pip-bg-opacity', String(v/100));
   try { localStorage.setItem('pipOpacity', String(v)); } catch (_) {}
+});
+document.getElementById('pipWinOpacity').addEventListener('input', (e) => {
+  let v = parseInt(e.target.value, 10); if (!isFinite(v)) v = 100;
+  v = Math.min(100, Math.max(50, v)); e.target.value = v;
+  try { localStorage.setItem('pipWinOpacity', String(v)); } catch (_) {}
+  // PiP表示中なら窓の不透明度を即時反映（チャート再描画は伴わない軽量送信）
+  if (document.body.classList.contains('pip'))
+    sendToNative(JSON.stringify({ type:'pip', on:true, size: pipSizeValue(), opacity: v }));
 });
 
 // ---- 監視パス / 再スキャン ----------------------------------------------
@@ -1338,9 +1352,15 @@ function pipSizeValue(){
   if (!isFinite(v)) v = 320;
   return Math.min(520, Math.max(240, v));
 }
+// PiP ウィンドウ自体の不透明度（%）。ネイティブ側が窓の alpha に反映する。
+function pipWinOpacityValue(){
+  let v = parseInt(document.getElementById('pipWinOpacity').value, 10);
+  if (!isFinite(v)) v = 100;
+  return Math.min(100, Math.max(50, v));
+}
 function setPip(on){
   document.body.classList.toggle('pip', on);
-  sendToNative(JSON.stringify({ type:'pip', on: !!on, size: pipSizeValue() }));
+  sendToNative(JSON.stringify({ type:'pip', on: !!on, size: pipSizeValue(), opacity: pipWinOpacityValue() }));
   if (on && lastData) requestAnimationFrame(() => renderPipCharts(lastData));
   try { localStorage.setItem('pipMode', on ? '1' : '0'); } catch (_) {}
 }

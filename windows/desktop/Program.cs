@@ -25,6 +25,21 @@ internal static class Program
     [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
+    // PiP ウィンドウの不透明度をレイヤードウィンドウで実現する（WPF の Opacity は
+    // AllowsTransparency=true が必要で実行時に切替できないため、Win32 で直接行う）。
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_LAYERED = 0x00080000;
+    private const uint LWA_ALPHA = 0x2;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
     [STAThread]
     private static void Main()
     {
@@ -128,10 +143,39 @@ internal static class Program
                     : System.Windows.Media.Brushes.White;
             }
 
-            void SetPip(bool on, double size)
+            // PiP ウィンドウの不透明度を適用/解除（レイヤードウィンドウ）。
+            void ApplyPipOpacity(int opacity)
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+                if (hwnd == IntPtr.Zero) return;
+                try
+                {
+                    int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                    SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+                    byte alpha = (byte)Math.Clamp(opacity * 255 / 100, 0, 255);
+                    SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+                }
+                catch { /* 古いOS/失敗時は不透明のまま */ }
+            }
+            void RemovePipOpacity()
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+                if (hwnd == IntPtr.Zero) return;
+                try
+                {
+                    int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                    if ((ex & WS_EX_LAYERED) != 0)
+                        SetWindowLong(hwnd, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
+                }
+                catch { /* 失敗は無視 */ }
+            }
+
+            void SetPip(bool on, double size, int opacity)
             {
                 if (size < 240) size = 240;
                 if (size > 520) size = 520;
+                if (opacity < 30) opacity = 30;
+                if (opacity > 100) opacity = 100;
                 if (on && !pipOn)
                 {
                     // 通常表示の復元用に現在のジオメトリ/スタイルを退避
@@ -168,6 +212,10 @@ internal static class Program
                     win.Left = prevL; win.Top = prevT;
                     pipOn = false;
                 }
+
+                // PiP 中だけ不透明度を適用し、通常表示へ戻したら解除する。
+                if (pipOn) ApplyPipOpacity(opacity);
+                else RemovePipOpacity();
             }
 
             // ページからのメッセージ処理:
@@ -199,7 +247,8 @@ internal static class Program
                         else if (type == "pip" && root.TryGetProperty("on", out var o))
                         {
                             double size = root.TryGetProperty("size", out var sz) && sz.TryGetDouble(out var szv) ? szv : 320;
-                            SetPip(o.ValueKind == System.Text.Json.JsonValueKind.True, size);
+                            int opacity = root.TryGetProperty("opacity", out var op) && op.TryGetInt32(out var opv) ? opv : 100;
+                            SetPip(o.ValueKind == System.Text.Json.JsonValueKind.True, size, opacity);
                         }
                         else if (type == "projectsDir")
                         {
