@@ -5,7 +5,7 @@ import WebKit
 // ローカルサーバーもポートも使わず、WKWebView 内にダッシュボードを表示し、
 // Stats が集計した値を evaluateJavaScript で直接流し込む。
 
-final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
     let stats: Stats
     weak var webView: WKWebView?
     // ウィンドウ操作は AppDelegate 側へ委譲（onChanged と同じパターン）。実体はメインスレッドで呼ぶ。
@@ -69,6 +69,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         push()
     }
 
+    // file:// 以外への遷移を遮断する（ローカル完結アプリのため外部ナビゲーションは不要）。
+    // fetch()/XHR はナビゲーションではないため本判定の対象外で、為替取得には影響しない。
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if let url = navigationAction.request.url, !(url.isFileURL || url.scheme == "about") {
+            decisionHandler(.cancel)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    // window.open / target=_blank による新規ウィンドウ生成を拒否する。
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        return nil
+    }
+
     // 集計スナップショットを UI スレッドからページへ配信。
     // JSON はそのまま JS の式（オブジェクトリテラル）として評価できる。
     func push() {
@@ -111,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let frame = NSRect(x: 0, y: 0, width: 1240, height: 860)
         webView = WKWebView(frame: frame, configuration: config)
         webView.navigationDelegate = bridge
+        webView.uiDelegate = bridge                        // window.open を遮断する
         webView.setValue(false, forKey: "drawsBackground") // 黒背景の透けを防ぐ
         bridge.webView = webView
 
