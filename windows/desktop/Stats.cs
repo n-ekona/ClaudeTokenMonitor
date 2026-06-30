@@ -12,8 +12,8 @@ namespace TokenMonitor;
 // server.js のロジックを C# へ移植したもの。
 public sealed class Stats
 {
-    // 料金表 (per MTok: input, output)
-    private static readonly (string key, double inP, double outP)[] Pricing =
+    // 既定の料金表 (per MTok: input, output)
+    private static readonly (string key, double inP, double outP)[] DefaultPricing =
     {
         ("claude-fable-5", 10, 50),
         ("claude-mythos-5", 10, 50),
@@ -30,6 +30,12 @@ public sealed class Stats
         ("claude-3-5-haiku", 0.8, 4),
         ("claude-3-haiku", 0.25, 1.25),
     };
+
+    // 実効の料金表（config で上書き可能）。UI から再計算するため可変。
+    private List<(string key, double inP, double outP)> _pricing = new(DefaultPricing);
+    // UI 設定（テーマ/通貨/PiP/表示カスタム等）の不透明な JSON。config.json の ui ブロックと
+    // snapshot の ui で素通しで往復する（中身の意味はすべて web 側が持つ）。
+    private string? _uiJson;
     private const double CacheWrite5mMult = 1.25;
     private const double CacheWrite1hMult = 2.0;
     private const double CacheReadMult = 0.1;
@@ -39,8 +45,10 @@ public sealed class Stats
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    public string ProjectsDir { get; }
+    public string ProjectsDir { get; private set; }
     private readonly string _homeDir;  // displayPath の ~ 短縮基準(ProjectsDir 上書きと無関係に実 home)
+    private readonly string _defaultProjectsDir;
+    private readonly string _configPath;
     public event Action? Changed;
 
     private readonly object _lock = new();
@@ -62,11 +70,80 @@ public sealed class Stats
     public Stats()
     {
         _homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        ProjectsDir = Environment.GetEnvironmentVariable("CLAUDE_PROJECTS_DIR")
+        _defaultProjectsDir = Environment.GetEnvironmentVariable("CLAUDE_PROJECTS_DIR")
             ?? Path.Combine(_homeDir, ".claude", "projects");
 
         var ms = Environment.GetEnvironmentVariable("REFRESH_INTERVAL_MS");
         _intervalMs = int.TryParse(ms, out var v) ? Math.Clamp(v, 500, 600000) : 3000;
+
+        var dataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ClaudeTokenMonitor");
+        _configPath = Path.Combine(dataDir, "config.json");
+
+        ProjectsDir = _defaultProjectsDir;
+        LoadConfig(); // 設定ファイルがあれば projectsDir / intervalMs / pricing を上書き
+    }
+
+    // ---- 設定ファイル(config.json)の読み書き --------------------------------
+    private void LoadConfig()
+    {
+        try
+        {
+            if (!File.Exists(_configPath)) return;
+            using var doc = JsonDocument.Parse(File.ReadAllText(_configPath));
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return;
+
+            if (root.TryGetProperty("projectsDir", out var pd) && pd.ValueKind == JsonValueKind.String)
+            {
+                var s = pd.GetString();
+                if (!string.IsNullOrWhiteSpace(s)) ProjectsDir = s;
+            }
+            if (root.TryGetProperty("intervalMs", out var iv) && iv.TryGetInt32(out var ivv))
+                _intervalMs = Math.Clamp(ivv, 500, 600000);
+            if (root.TryGetProperty("pricing", out var pr) && pr.ValueKind == JsonValueKind.Array)
+            {
+                var list = ParsePricing(pr);
+                if (list.Count > 0) _pricing = list;
+            }
+            if (root.TryGetProperty("ui", out var uiEl) && uiEl.ValueKind == JsonValueKind.Object)
+                _uiJson = uiEl.GetRawText();
+        }
+        catch { /* 壊れた設定は無視して既定で動く */ }
+    }
+
+    private void SaveConfig()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_configPath)!);
+            var obj = new Dictionary<string, object?>
+            {
+                ["projectsDir"] = ProjectsDir,
+                ["intervalMs"] = _intervalMs,
+                ["pricing"] = _pricing.Select(p => new { key = p.key, @in = p.inP, @out = p.outP }),
+            };
+            if (_uiJson != null) obj["ui"] = JsonSerializer.Deserialize<JsonElement>(_uiJson);
+            File.WriteAllText(_configPath, JsonSerializer.Serialize(obj, JsonOpts));
+        }
+        catch { /* 保存失敗は致命的ではない */ }
+    }
+
+    private static List<(string key, double inP, double outP)> ParsePricing(JsonElement arr)
+    {
+        var list = new List<(string, double, double)>();
+        foreach (var e in arr.EnumerateArray())
+        {
+            if (e.ValueKind != JsonValueKind.Object) continue;
+            if (!e.TryGetProperty("key", out var k) || k.ValueKind != JsonValueKind.String) continue;
+            var key = k.GetString();
+            if (string.IsNullOrEmpty(key)) continue;
+            double inP = e.TryGetProperty("in", out var ie) && ie.TryGetDouble(out var iv) ? iv : 0;
+            double outP = e.TryGetProperty("out", out var oe) && oe.TryGetDouble(out var ov) ? ov : 0;
+            list.Add((key, inP, outP));
+        }
+        return list;
     }
 
     // Claude Code がフォルダ名生成に使う規則: 英数字(ASCII)以外をすべて '-' に。
@@ -122,9 +199,9 @@ public sealed class Stats
         }
     }
 
-    private static (double inP, double outP) PriceFor(string model)
+    private (double inP, double outP) PriceFor(string model)
     {
-        foreach (var p in Pricing)
+        foreach (var p in _pricing)
             if (model == p.key || model.StartsWith(p.key, StringComparison.Ordinal))
                 return (p.inP, p.outP);
         return (5, 25); // フォールバック
@@ -137,11 +214,76 @@ public sealed class Stats
         _interval = new Timer(_ => Tick(), null, _intervalMs, _intervalMs);
     }
 
-    // 更新間隔をミリ秒で変更（UI/環境変数から）
+    // 更新間隔をミリ秒で変更（UI/環境変数から）。設定ファイルへも保存。
     public void SetInterval(int ms)
     {
         _intervalMs = Math.Clamp(ms, 500, 600000);
         _interval?.Change(_intervalMs, _intervalMs);
+        SaveConfig();
+    }
+
+    // 集計状態を全消去（パス変更・再スキャン・単価変更で使う）。呼び出しは _lock 内。
+    private void ClearState()
+    {
+        _total.Reset();
+        _byModel.Clear();
+        _byProject.Clear();
+        _byDay.Clear();
+        _byProjectCanonical.Clear();
+        _byProjectCanonicalMatch.Clear();
+        _seenIds.Clear();
+        _offsets.Clear();
+        _lastActivity = null;
+    }
+
+    // 監視対象パスを変更し、全クリアして再スキャン。空文字なら既定へ戻す。
+    public void SetProjectsDir(string? path)
+    {
+        lock (_lock)
+        {
+            ProjectsDir = string.IsNullOrWhiteSpace(path) ? _defaultProjectsDir : path.Trim();
+            ClearState();
+            foreach (var f in EnumerateJsonl()) IngestFile(f);
+        }
+        SaveConfig();
+        Changed?.Invoke();
+    }
+
+    // 集計を全クリアして再スキャン（リセット）。
+    public void Rescan()
+    {
+        lock (_lock)
+        {
+            ClearState();
+            foreach (var f in EnumerateJsonl()) IngestFile(f);
+        }
+        Changed?.Invoke();
+    }
+
+    // モデル単価を上書きし、コスト再計算のため全クリアして再スキャン。設定ファイルへ保存。
+    public void SetPricing(List<(string key, double inP, double outP)> pricing)
+    {
+        lock (_lock)
+        {
+            _pricing = (pricing != null && pricing.Count > 0)
+                ? pricing
+                : new List<(string, double, double)>(DefaultPricing);
+            ClearState();
+            foreach (var f in EnumerateJsonl()) IngestFile(f);
+        }
+        SaveConfig();
+        Changed?.Invoke();
+    }
+
+    // UI から受け取った JSON 配列でモデル単価を更新。
+    public void SetPricingFromJson(JsonElement arr) => SetPricing(ParsePricing(arr));
+
+    // UI 設定（テーマ/通貨/PiP/表示カスタム等の不透明な JSON）を保存する。
+    // 集計には影響しないため再スキャンしない。
+    public void SetUi(JsonElement settings)
+    {
+        _uiJson = settings.GetRawText();
+        SaveConfig();
     }
 
     // タイマーを停止（ウィンドウ終了時に呼ぶ）。終了後の不要なファイル走査と
@@ -365,6 +507,8 @@ public sealed class Stats
                 startedAt = _startedAt,
                 projectsDir = ProjectsDir,
                 intervalMs = _intervalMs,
+                pricing = _pricing.Select(p => new { key = p.key, @in = p.inP, @out = p.outP }),
+                ui = _uiJson != null ? (object?)JsonSerializer.Deserialize<JsonElement>(_uiJson) : null,
                 now = DateTime.UtcNow.ToString("o"),
             };
             return JsonSerializer.Serialize(snap, JsonOpts);
@@ -461,6 +605,12 @@ public sealed class Stats
     {
         public long Input, Output, CacheWrite5m, CacheWrite1h, CacheRead, Messages;
         public double Cost;
+
+        public void Reset()
+        {
+            Input = Output = CacheWrite5m = CacheWrite1h = CacheRead = Messages = 0;
+            Cost = 0;
+        }
 
         public BucketDto ToDto(string? name) => new()
         {

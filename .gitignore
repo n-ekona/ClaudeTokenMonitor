@@ -22,3 +22,8 @@ Thumbs.db
 .DS_Store
 .idea/
 .vscode/
+
+# ---- Claude 作業用ドキュメント（ローカル専用・非公開） ----
+HANDOFF.md
+CLAUDE.md
+docs/superpowers/

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Windows;
+using System.Windows.Media.Imaging;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 
@@ -18,6 +19,27 @@ internal static class Program
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+    // タイトルバーをダーク/ライト表示にする（Windows 10 2004+ / 11）
+    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    // PiP ウィンドウの不透明度をレイヤードウィンドウで実現する（WPF の Opacity は
+    // AllowsTransparency=true が必要で実行時に切替できないため、Win32 で直接行う）。
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_LAYERED = 0x00080000;
+    private const uint LWA_ALPHA = 0x2;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
     [STAThread]
     private static void Main()
     {
@@ -31,6 +53,14 @@ internal static class Program
             WindowStartupLocation = WindowStartupLocation.CenterScreen,
             Background = System.Windows.Media.Brushes.Black,
         };
+
+        // ウィンドウ/タスクバーのアイコン（出力フォルダの icon.ico）
+        try
+        {
+            var iconPath = Path.Combine(AppContext.BaseDirectory, "icon.ico");
+            if (File.Exists(iconPath)) win.Icon = BitmapFrame.Create(new Uri(iconPath));
+        }
+        catch { /* アイコン無し/読込失敗でも起動は続行 */ }
 
         // WebView2 初期化中にウィンドウを閉じると native 側でデッドロック（ハング）するため、
         // 初期化完了まで WM_CLOSE を握りつぶして「閉じる操作」自体を無効化する。
@@ -98,15 +128,60 @@ internal static class Program
             var prevResize = win.ResizeMode;
             var prevStyle = win.WindowStyle;
 
-            void SetPip(bool on)
+            // タイトルバー（とウィンドウ素地）の配色をテーマに合わせる
+            void ApplyTheme(bool dark)
             {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+                if (hwnd != IntPtr.Zero)
+                {
+                    int v = dark ? 1 : 0;
+                    try { DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref v, sizeof(int)); }
+                    catch { /* 古い Windows では未対応・無視 */ }
+                }
+                win.Background = dark
+                    ? System.Windows.Media.Brushes.Black
+                    : System.Windows.Media.Brushes.White;
+            }
+
+            // PiP ウィンドウの不透明度を適用/解除（レイヤードウィンドウ）。
+            void ApplyPipOpacity(int opacity)
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+                if (hwnd == IntPtr.Zero) return;
+                try
+                {
+                    int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                    SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+                    byte alpha = (byte)Math.Clamp(opacity * 255 / 100, 0, 255);
+                    SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+                }
+                catch { /* 古いOS/失敗時は不透明のまま */ }
+            }
+            void RemovePipOpacity()
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+                if (hwnd == IntPtr.Zero) return;
+                try
+                {
+                    int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                    if ((ex & WS_EX_LAYERED) != 0)
+                        SetWindowLong(hwnd, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
+                }
+                catch { /* 失敗は無視 */ }
+            }
+
+            void SetPip(bool on, double size, int opacity)
+            {
+                if (size < 240) size = 240;
+                if (size > 520) size = 520;
+                if (opacity < 30) opacity = 30;
+                if (opacity > 100) opacity = 100;
                 if (on && !pipOn)
                 {
                     // 通常表示の復元用に現在のジオメトリ/スタイルを退避
                     prevW = win.Width; prevH = win.Height; prevL = win.Left; prevT = win.Top;
                     prevState = win.WindowState; prevResize = win.ResizeMode; prevStyle = win.WindowStyle;
 
-                    const double size = 320; // 小さな正方形
                     win.WindowState = WindowState.Normal;
                     // タイトルバー（最小化/最大化/×）と枠を消してフチなしの正方形にする
                     win.WindowStyle = WindowStyle.None;
@@ -119,6 +194,14 @@ internal static class Program
                     win.Top = wa.Bottom - size - 24;
                     pipOn = true;
                 }
+                else if (on && pipOn)
+                {
+                    // 既に PiP 表示中にサイズだけ変わった場合は、その場でリサイズして配置し直す
+                    win.Width = size; win.Height = size;
+                    var wa = SystemParameters.WorkArea;
+                    win.Left = wa.Right - size - 24;
+                    win.Top = wa.Bottom - size - 24;
+                }
                 else if (!on && pipOn)
                 {
                     win.Topmost = false;
@@ -129,12 +212,21 @@ internal static class Program
                     win.Left = prevL; win.Top = prevT;
                     pipOn = false;
                 }
+
+                // PiP 中だけ不透明度を適用し、通常表示へ戻したら解除する。
+                if (pipOn) ApplyPipOpacity(opacity);
+                else RemovePipOpacity();
             }
 
             // ページからのメッセージ処理:
-            //   "ready"                      → 初回スナップショット送信
-            //   {"type":"interval","ms":N}   → 更新間隔を変更
-            //   {"type":"pip","on":bool}     → 正方形(PiP)モードの切替
+            //   "ready"                       → 初回スナップショット送信
+            //   {"type":"interval","ms":N}    → 更新間隔を変更
+            //   {"type":"pip","on":b,"size":N}→ 正方形(PiP)モードの切替
+            //   {"type":"drag"}               → PiP ウィンドウのドラッグ開始
+            //   {"type":"projectsDir","path"} → 監視対象パスの変更＋再スキャン
+            //   {"type":"rescan"}             → 集計を全クリアして再スキャン
+            //   {"type":"pricing","table":[]} → モデル単価の上書き＋再計算
+            //   {"type":"theme","mode":"dark"}→ タイトルバー配色の切替
             core.WebMessageReceived += (_, e) =>
             {
                 string? msg = null;
@@ -154,7 +246,33 @@ internal static class Program
                         }
                         else if (type == "pip" && root.TryGetProperty("on", out var o))
                         {
-                            SetPip(o.ValueKind == System.Text.Json.JsonValueKind.True);
+                            double size = root.TryGetProperty("size", out var sz) && sz.TryGetDouble(out var szv) ? szv : 320;
+                            int opacity = root.TryGetProperty("opacity", out var op) && op.TryGetInt32(out var opv) ? opv : 100;
+                            SetPip(o.ValueKind == System.Text.Json.JsonValueKind.True, size, opacity);
+                        }
+                        else if (type == "projectsDir")
+                        {
+                            var path = root.TryGetProperty("path", out var p) ? p.GetString() : null;
+                            stats.SetProjectsDir(path);
+                        }
+                        else if (type == "rescan")
+                        {
+                            stats.Rescan();
+                        }
+                        else if (type == "pricing" && root.TryGetProperty("table", out var tbl)
+                                 && tbl.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            stats.SetPricingFromJson(tbl);
+                        }
+                        else if (type == "theme")
+                        {
+                            var mode = root.TryGetProperty("mode", out var md) ? md.GetString() : null;
+                            ApplyTheme(mode != "light"); // 既定はダーク
+                        }
+                        else if (type == "ui" && root.TryGetProperty("settings", out var st)
+                                 && st.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            stats.SetUi(st);
                         }
                         else if (type == "drag" && pipOn)
                         {
