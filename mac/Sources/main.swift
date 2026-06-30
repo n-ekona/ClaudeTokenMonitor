@@ -54,9 +54,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                 let cb = onPip
                 DispatchQueue.main.async { cb?(on, size, opacity) }
             case "drag":
-                // ドラッグは現在のマウスイベントを使うため main で同期実行する
-                // （async だと NSApp.currentEvent が失われ performDrag を呼べない）。
-                // 本ハンドラは WKScriptMessageHandler 仕様で既に main スレッド上で呼ばれる。
+                // 余計な遅延を入れず main スレッド上で即実行する。実際のウィンドウ移動は
+                // isMovableByWindowBackground=true の背景ドラッグが担い、pipDrag の
+                // performDrag は発火元イベントが取れた場合だけのベストエフォート。
                 onDrag?()
             default:
                 break
@@ -222,9 +222,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return NSRect(x: vf.maxX - side - margin, y: vf.minY + margin, width: side, height: side)
     }
 
-    // PiP のドラッグ。borderless + isMovableByWindowBackground=true により背景ドラッグでも
-    // 動くが、JS の pointerdown 起点で即ドラッグを開始できるよう、現在のマウスイベントが
-    // 取れる場合は performDrag を呼ぶ。取れない場合は背景ドラッグに委ねる（安全側）。
+    // PiP のドラッグ。ウィンドウ移動は isMovableByWindowBackground=true の背景ドラッグが
+    // 確実に担う。ここは発火元のマウスイベントが今も有効な場合に限り performDrag で即時
+    // ドラッグを試みるベストエフォート（WKScriptMessage の配送はマウスイベントに対して
+    // 非同期のため取れないことが多く、その場合は背景ドラッグへ委ねる。型確認でクラッシュ回避）。
     private func pipDrag() {
         guard pipOn else { return }
         if let ev = NSApp.currentEvent,

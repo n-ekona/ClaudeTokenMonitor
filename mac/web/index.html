@@ -652,13 +652,22 @@ function maybeRestoreUi(ui){
   if (_uiRestoreChecked) return;
   _uiRestoreChecked = true;
   if (!ui || typeof ui !== 'object') return;
-  let hasLocal = false;
-  try { hasLocal = localStorage.getItem('theme') !== null || localStorage.getItem('lang') !== null; } catch (_) {}
-  if (hasLocal) return; // ローカルが正本（ネイティブと一致しているはず）
+  let alreadyHydrated = false, hasLocal = false;
+  try {
+    // 復元済みマーカー（リロードをまたいで残る）。これが無限リロードを防ぐ要。
+    alreadyHydrated = localStorage.getItem('_uiHydrated') !== null;
+    // UI 設定が1つでもあればローカルが正本とみなす（theme/lang は明示操作時しか保存
+    // されないため、それだけを見ると復元対象が theme/lang を含まないとき判定を誤る）。
+    hasLocal = UI_KEYS.some((k) => localStorage.getItem(k) !== null);
+  } catch (_) {}
+  if (alreadyHydrated || hasLocal) return;
   try {
     let wrote = false;
     for (const k in ui){ if (typeof ui[k] === 'string'){ localStorage.setItem(k, ui[k]); wrote = true; } }
-    if (wrote) location.reload(); // クリーンに再初期化して復元
+    if (wrote){
+      try { localStorage.setItem('_uiHydrated', '1'); } catch (_) {} // 再ループ防止マーカー
+      location.reload(); // クリーンに再初期化して復元
+    }
   } catch (_) {}
 }
 
