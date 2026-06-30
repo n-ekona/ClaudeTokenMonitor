@@ -153,6 +153,10 @@ static void on_message(WebKitUserContentManager *ucm, WebKitJavascriptResult *re
                         JsonNode *tn = json_object_get_member(o, "table");
                         if (JSON_NODE_HOLDS_ARRAY(tn))
                             stats_set_pricing(app->stats, json_node_get_array(tn));
+                    } else if (g_strcmp0(type, "ui") == 0 && json_object_has_member(o, "settings")) {
+                        JsonNode *sn = json_object_get_member(o, "settings");
+                        if (JSON_NODE_HOLDS_OBJECT(sn))
+                            stats_set_ui(app->stats, sn);
                     } else if (g_strcmp0(type, "theme") == 0) {
                         const char *mode = json_object_get_string_member_with_default(o, "mode", NULL);
                         apply_theme(g_strcmp0(mode, "light") != 0); // 既定はダーク

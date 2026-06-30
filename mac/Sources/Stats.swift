@@ -23,6 +23,9 @@ final class Stats {
 
     // 実効の料金表（config で上書き可能）。UI から再計算するため可変。
     private var pricing: [(key: String, inP: Double, outP: Double)] = Stats.DEFAULT_PRICING
+    // UI 設定（テーマ/通貨/PiP/表示カスタム等）の不透明な JSON。config.json の ui ブロックと
+    // snapshot の ui で素通しで往復する（中身の意味はすべて web 側が持つ）。
+    private var uiObject: Any?
     private static let cacheWrite5mMult = 1.25
     private static let cacheWrite1hMult = 2.0
     private static let cacheReadMult = 0.1
@@ -111,6 +114,9 @@ final class Stats {
             let list = Stats.parsePricing(pr)
             if !list.isEmpty { pricing = list }
         }
+        if let ui = obj["ui"] as? [String: Any] {
+            uiObject = ui
+        }
     }
 
     private func saveConfig() {
@@ -119,8 +125,10 @@ final class Stats {
         let pd = projectsDir
         let iv = intervalMs
         let pr = pricing.map { ["key": $0.key, "in": $0.inP, "out": $0.outP] as [String: Any] }
+        let ui = uiObject
         lock.unlock()
-        let obj: [String: Any] = ["projectsDir": pd, "intervalMs": iv, "pricing": pr]
+        var obj: [String: Any] = ["projectsDir": pd, "intervalMs": iv, "pricing": pr]
+        if let ui = ui { obj["ui"] = ui }
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted])
         else { return }
         let dir = (configPath as NSString).deletingLastPathComponent
@@ -217,6 +225,14 @@ final class Stats {
     // UI から受け取った JSON 配列([{key,in,out}])でモデル単価を更新。
     func setPricingFromJson(_ arr: [Any]) {
         setPricing(Stats.parsePricing(arr))
+    }
+
+    // UI 設定（不透明な JSON オブジェクト）を保存する。集計に影響しないため再スキャンしない。
+    func setUi(_ settings: Any) {
+        lock.lock()
+        uiObject = settings
+        lock.unlock()
+        saveConfig()
     }
 
     // タイマーを停止（ウィンドウ終了時に呼ぶ）。
@@ -454,6 +470,7 @@ final class Stats {
             "projectsDir": projectsDir,
             "intervalMs": intervalMs,
             "pricing": pricing.map { ["key": $0.key, "in": $0.inP, "out": $0.outP] as [String: Any] },
+            "ui": uiObject ?? NSNull(),
             "now": isoOut.string(from: Date()),
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: snap, options: []),

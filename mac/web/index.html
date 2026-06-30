@@ -613,6 +613,55 @@ window.__recv = function(d){
   try { render(typeof d === 'string' ? JSON.parse(d) : d); } catch (_) {}
 };
 
+// ---- UI 設定のネイティブ永続化（config.json の ui ブロックへミラー）-----------
+// localStorage を正本とし、変更を debounce してネイティブへ送る。ネイティブは不透明な
+// JSON として config.json に保存し、snapshot の d.ui でそのままエコーする。
+// localStorage が空（プロファイル消去・別マシンへの移行など）の初回 snapshot で
+// d.ui があれば、それを localStorage へ展開してリロードし復元する。
+const UI_KEYS = ['lang','theme','customTheme','defaultDayRange','showFx','compactNums',
+  'currency','rateAuto','startInPip','pipSize','pipOpacity','pipWinOpacity'];
+function collectUiSettings(){
+  const o = {};
+  try {
+    for (let i = 0; i < UI_KEYS.length; i++){
+      const v = localStorage.getItem(UI_KEYS[i]);
+      if (v !== null) o[UI_KEYS[i]] = v;
+    }
+    const cur = localStorage.getItem('currency'); // 現在通貨のレートキャッシュも含める
+    if (cur){ const r = localStorage.getItem('fxRate_' + cur); if (r !== null) o['fxRate_' + cur] = r; }
+  } catch (_) {}
+  return o;
+}
+function saveUi(){
+  try { sendToNative(JSON.stringify({ type:'ui', settings: collectUiSettings() })); } catch (_) {}
+}
+let _saveUiTimer = null;
+function scheduleSaveUi(){ clearTimeout(_saveUiTimer); _saveUiTimer = setTimeout(saveUi, 400); }
+// localStorage.setItem を捕捉し、UI 設定の変更を自動でネイティブへミラーする
+// （個別ハンドラへ saveUi を散らさず一元化）。上書き不可な環境では自動ミラーを諦める。
+try {
+  const _origSet = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = function(k, v){
+    _origSet(k, v);
+    if (UI_KEYS.indexOf(k) >= 0 || (typeof k === 'string' && k.indexOf('fxRate_') === 0)) scheduleSaveUi();
+  };
+} catch (_) { /* localStorage は通常動作のまま（自動ミラーのみ無効） */ }
+// 初回 snapshot 時、localStorage が空ならネイティブ保存設定から復元する。
+let _uiRestoreChecked = false;
+function maybeRestoreUi(ui){
+  if (_uiRestoreChecked) return;
+  _uiRestoreChecked = true;
+  if (!ui || typeof ui !== 'object') return;
+  let hasLocal = false;
+  try { hasLocal = localStorage.getItem('theme') !== null || localStorage.getItem('lang') !== null; } catch (_) {}
+  if (hasLocal) return; // ローカルが正本（ネイティブと一致しているはず）
+  try {
+    let wrote = false;
+    for (const k in ui){ if (typeof ui[k] === 'string'){ localStorage.setItem(k, ui[k]); wrote = true; } }
+    if (wrote) location.reload(); // クリーンに再初期化して復元
+  } catch (_) {}
+}
+
 // ---- 表示オプション（localStorage 所有） --------------------------------
 let showFx = true;
 let compactMode = false;
@@ -907,11 +956,16 @@ currencySel.addEventListener('change', () => {
 rateEl.addEventListener('input', (e) => {
   fxRate = parseFloat(e.target.value) || 0;
   if (rateAutoEl.checked){ rateAutoEl.checked = false; rateEl.readOnly = false; rateInfoEl.textContent = t('fx.manual'); }
+  try {
+    localStorage.setItem('rateAuto', '0');
+    if (currency !== 'USD' && fxRate > 0) localStorage.setItem('fxRate_' + currency, String(fxRate));
+  } catch (_) {}
 });
 
 rateAutoEl.addEventListener('change', () => {
   if (rateAutoEl.checked){ rateEl.readOnly = true; refreshRate(); }
   else { rateEl.readOnly = false; rateInfoEl.textContent = t('fx.manual'); }
+  try { localStorage.setItem('rateAuto', rateAutoEl.checked ? '1' : '0'); } catch (_) {}
 });
 
 // 起動時: 通貨を復元 → 前回取得値があれば即適用 → APIで更新。以後30分ごとに更新。
@@ -922,6 +976,7 @@ rateAutoEl.addEventListener('change', () => {
     if (savedCur && CURRENCIES.some(c => c.code === savedCur)) currency = savedCur;
   } catch (_) {}
   currencySel.value = currency;
+  try { const ra = localStorage.getItem('rateAuto'); if (ra !== null) rateAutoEl.checked = (ra === '1'); } catch (_) {}
   updateRateUnit();
   applyCachedRate();
   rateEl.readOnly = (currency === 'USD') ? true : rateAutoEl.checked;
@@ -1377,6 +1432,7 @@ document.getElementById('dayRange').addEventListener('change', () => { if (lastD
 
 // ---- 描画 ----------------------------------------------------------------
 function render(d){
+  maybeRestoreUi(d.ui);   // 初回 snapshot のみ判定（localStorage が空なら復元）
   const prevTokens = lastData ? lastData.total.tokens : 0;
   lastData = d;
   const tot = d.total;

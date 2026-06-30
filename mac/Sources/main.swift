@@ -41,6 +41,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 stats.rescan()
             case "pricing":
                 if let table = obj["table"] as? [Any] { stats.setPricingFromJson(table) }
+            case "ui":
+                if let settings = obj["settings"] as? [String: Any] { stats.setUi(settings) }
             case "theme":
                 let dark = (obj["mode"] as? String) != "light" // 既定はダーク
                 let cb = onTheme

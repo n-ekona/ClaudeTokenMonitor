@@ -269,6 +269,11 @@ internal static class Program
                             var mode = root.TryGetProperty("mode", out var md) ? md.GetString() : null;
                             ApplyTheme(mode != "light"); // 既定はダーク
                         }
+                        else if (type == "ui" && root.TryGetProperty("settings", out var st)
+                                 && st.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            stats.SetUi(st);
+                        }
                         else if (type == "drag" && pipOn)
                         {
                             // フチなしPiPでもウィンドウを掴んで移動できるようにする。

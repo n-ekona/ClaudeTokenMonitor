@@ -61,6 +61,7 @@ struct _Stats {
     GHashTable *offsets;     // char* path -> gint64*
     char *last_activity;
     char *started_at;
+    JsonNode *ui;            // UI 設定の不透明な JSON（config.json の ui ブロック。所有・複製で保持）
 };
 
 static gint64 bucket_tokens(const Bucket *b) {
@@ -182,6 +183,13 @@ static void load_config(Stats *s) {
                 if (JSON_NODE_HOLDS_ARRAY(pr))
                     pricing_set_from_array(s, json_node_get_array(pr)); // 空なら既定のまま
             }
+            if (json_object_has_member(o, "ui")) {
+                JsonNode *un = json_object_get_member(o, "ui");
+                if (un && JSON_NODE_HOLDS_OBJECT(un)) {
+                    if (s->ui) json_node_free(s->ui);
+                    s->ui = json_node_copy(un);
+                }
+            }
         }
     }
     g_object_unref(p);
@@ -198,6 +206,10 @@ static void save_config(Stats *s) {
     json_builder_set_member_name(b, "projectsDir"); json_builder_add_string_value(b, s->projects_dir);
     json_builder_set_member_name(b, "intervalMs");  json_builder_add_int_value(b, s->interval_ms);
     json_builder_set_member_name(b, "pricing");     add_pricing_array(b, s);
+    if (s->ui) {
+        json_builder_set_member_name(b, "ui");
+        json_builder_add_value(b, json_node_copy(s->ui)); // add_value が複製の所有権を取る
+    }
     json_builder_end_object(b);
 
     JsonGenerator *gen = json_generator_new();
@@ -276,6 +288,7 @@ void stats_free(Stats *s) {
     g_free(s->config_path);
     g_free(s->last_activity);
     g_free(s->started_at);
+    if (s->ui) json_node_free(s->ui);
     g_free(s);
 }
 
@@ -314,6 +327,13 @@ void stats_set_pricing(Stats *s, JsonArray *table) {
         pricing_set_defaults(s); // 空/NULL/全無効なら既定14件へ
     clear_state(s);
     stats_full_scan(s);
+    save_config(s);
+}
+
+// UI 設定（不透明な JSON オブジェクト）を保存。集計に影響しないため再スキャンしない。
+void stats_set_ui(Stats *s, JsonNode *settings) {
+    if (s->ui) { json_node_free(s->ui); s->ui = NULL; }
+    if (settings && JSON_NODE_HOLDS_OBJECT(settings)) s->ui = json_node_copy(settings);
     save_config(s);
 }
 
@@ -778,6 +798,9 @@ char *stats_snapshot_json(Stats *s) {
     json_builder_set_member_name(b, "projectsDir"); json_builder_add_string_value(b, s->projects_dir);
     json_builder_set_member_name(b, "intervalMs"); json_builder_add_int_value(b, s->interval_ms);
     json_builder_set_member_name(b, "pricing");    add_pricing_array(b, s); // UI のエディタ初期化用
+    json_builder_set_member_name(b, "ui");
+    if (s->ui) json_builder_add_value(b, json_node_copy(s->ui)); // UI 設定をエコー
+    else json_builder_add_null_value(b);
     char *now = iso_now();
     json_builder_set_member_name(b, "now"); json_builder_add_string_value(b, now);
     g_free(now);

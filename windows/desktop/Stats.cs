@@ -33,6 +33,9 @@ public sealed class Stats
 
     // 実効の料金表（config で上書き可能）。UI から再計算するため可変。
     private List<(string key, double inP, double outP)> _pricing = new(DefaultPricing);
+    // UI 設定（テーマ/通貨/PiP/表示カスタム等）の不透明な JSON。config.json の ui ブロックと
+    // snapshot の ui で素通しで往復する（中身の意味はすべて web 側が持つ）。
+    private string? _uiJson;
     private const double CacheWrite5mMult = 1.25;
     private const double CacheWrite1hMult = 2.0;
     private const double CacheReadMult = 0.1;
@@ -104,6 +107,8 @@ public sealed class Stats
                 var list = ParsePricing(pr);
                 if (list.Count > 0) _pricing = list;
             }
+            if (root.TryGetProperty("ui", out var uiEl) && uiEl.ValueKind == JsonValueKind.Object)
+                _uiJson = uiEl.GetRawText();
         }
         catch { /* 壊れた設定は無視して既定で動く */ }
     }
@@ -113,12 +118,13 @@ public sealed class Stats
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_configPath)!);
-            var obj = new
+            var obj = new Dictionary<string, object?>
             {
-                projectsDir = ProjectsDir,
-                intervalMs = _intervalMs,
-                pricing = _pricing.Select(p => new { key = p.key, @in = p.inP, @out = p.outP }),
+                ["projectsDir"] = ProjectsDir,
+                ["intervalMs"] = _intervalMs,
+                ["pricing"] = _pricing.Select(p => new { key = p.key, @in = p.inP, @out = p.outP }),
             };
+            if (_uiJson != null) obj["ui"] = JsonSerializer.Deserialize<JsonElement>(_uiJson);
             File.WriteAllText(_configPath, JsonSerializer.Serialize(obj, JsonOpts));
         }
         catch { /* 保存失敗は致命的ではない */ }
@@ -271,6 +277,14 @@ public sealed class Stats
 
     // UI から受け取った JSON 配列でモデル単価を更新。
     public void SetPricingFromJson(JsonElement arr) => SetPricing(ParsePricing(arr));
+
+    // UI 設定（テーマ/通貨/PiP/表示カスタム等の不透明な JSON）を保存する。
+    // 集計には影響しないため再スキャンしない。
+    public void SetUi(JsonElement settings)
+    {
+        _uiJson = settings.GetRawText();
+        SaveConfig();
+    }
 
     // タイマーを停止（ウィンドウ終了時に呼ぶ）。終了後の不要なファイル走査と
     // Dispatcher シャットダウン競合を防ぐ。
@@ -494,6 +508,7 @@ public sealed class Stats
                 projectsDir = ProjectsDir,
                 intervalMs = _intervalMs,
                 pricing = _pricing.Select(p => new { key = p.key, @in = p.inP, @out = p.outP }),
+                ui = _uiJson != null ? (object?)JsonSerializer.Deserialize<JsonElement>(_uiJson) : null,
                 now = DateTime.UtcNow.ToString("o"),
             };
             return JsonSerializer.Serialize(snap, JsonOpts);

@@ -33,4 +33,8 @@ void        stats_rescan(Stats *s);
 // 空/NULL の JsonArray なら既定14件へ戻す。
 void        stats_set_pricing(Stats *s, JsonArray *table);
 
+// UI 設定（不透明な JSON オブジェクト）を保存する。集計に影響しないため再スキャンしない。
+// settings の所有権は移さない（内部で複製して保持する）。
+void        stats_set_ui(Stats *s, JsonNode *settings);
+
 #endif // TOKENMONITOR_STATS_H
