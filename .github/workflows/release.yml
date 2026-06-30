@@ -101,14 +101,14 @@ jobs:
           v="${{ needs.version.outputs.version }}"
           ditto -c -k --sequesterRsrc --keepParent \
             mac/dist/ClaudeTokenMonitor.app \
-            "ClaudeTokenMonitor-$v-mac-x64.zip"
-          ls -la ClaudeTokenMonitor-*-mac-x64.zip
+            "ClaudeTokenMonitor-$v-mac-universal.zip"
+          ls -la ClaudeTokenMonitor-*-mac-universal.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dist-macos
-          path: ClaudeTokenMonitor-*-mac-x64.zip
+          path: ClaudeTokenMonitor-*-mac-universal.zip
 
   # ---- Linux (C + GTK3 + WebKitGTK) — distro ごとに per-distro binary zip ----
   linux:
@@ -193,17 +193,21 @@ jobs:
             Windows / macOS / Linux 用ネイティブアプリ。いずれも同じダッシュボード UI を、
             各 OS ネイティブの WebView（WebView2 / WKWebView / WebKitGTK）で表示します。
 
-            ### 新機能（v1.3.0）
+            ### 新機能（v2.0.0）
 
-            - **プロジェクトの自動統合**：ディレクトリを移動した同一プロジェクトが、旧パスと新パスで
-              別々に集計されてしまう問題を修正。移動先（現存するパス）へ自動でまとめ、実パスで表示します。
-              （別ディレクトリにある同名の別プロジェクトは統合しません）
+            - **設定パネル**：歯車ボタンから開く設定パネルを追加。為替レートと更新間隔をここへ集約し、
+              **監視対象パスの指定**（`~/.claude/projects` 固定をやめ任意のディレクトリを指定可能）、
+              集計の再スキャン/リセット、表示カスタマイズ、モデル単価の上書き、PiP の挙動をまとめました。
+            - **テーマ**：ダーク/ライト/システム追従を切り替え可能に。タイトルバーやスクロールバー、
+              さらにグラフの配色までテーマに追従します。
+            - **表示通貨の選択**：USD からの換算先を日本円のほか主要通貨（EUR・GBP・CNY・KRW など）から選べます。
+            - **PiP（正方形）モードを 3 OS 対応**：これまで Windows のみだった PiP を macOS・Linux にも移植しました。
 
-            ### v1.2.0 から継続
+            ### これまでの主な機能
 
-            - **PiP（正方形）モード**：ヘッダーの「⛶ PiP」ボタンで、フチなしの小さな正方形ウィンドウに切替。
-              常に最前面・ドラッグで移動でき、背景にモデル別の円グラフ＋プロジェクト別の帯グラフ、
-              左上に直近7日のアクティビティ（草）、中央に総トークン（実数）と推定コストを表示します。
+            - **プロジェクトの自動統合**：ディレクトリを移動した同一プロジェクトを移動先へまとめ、実パスで表示します。
+            - **PiP（正方形）モード**：フチなしの小さな正方形ウィンドウに切替。常に最前面・ドラッグで移動でき、
+              背景にモデル別の円グラフとプロジェクト別の帯グラフ、中央に総トークンと推定コストを表示します。
 
             ### Windows（.NET 9 + WebView2）
 
@@ -218,7 +222,7 @@ jobs:
 
             | ファイル | 説明 |
             |---|---|
-            | `ClaudeTokenMonitor-*-mac-x64.zip` | **ユニバーサルバイナリ**（Intel / Apple Silicon 両対応）。展開して `ClaudeTokenMonitor.app` を実行。 |
+            | `ClaudeTokenMonitor-*-mac-universal.zip` | **ユニバーサルバイナリ**（Intel / Apple Silicon 両対応）。展開して `ClaudeTokenMonitor.app` を実行。 |
 
             > 追加ランタイムは不要です（WKWebView は macOS 標準・macOS 11 以降）。
 

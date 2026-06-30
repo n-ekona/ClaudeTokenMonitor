@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 APP_NAME="ClaudeTokenMonitor"
 DISP_NAME="Claude Code トークン監視"
 BUNDLE_ID="jp.nekona.claudetokenmonitor"
-VERSION="1.1.0"
+VERSION="2.0.0"
 
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
@@ -28,8 +28,9 @@ lipo -create "$TMP_ARM" "$TMP_X64" -output "$MACOS/$APP_NAME"
 rm -f "$TMP_ARM" "$TMP_X64"
 lipo -archs "$MACOS/$APP_NAME"
 
-echo "==> リソース配置 (web/)"
+echo "==> リソース配置 (web/ + アプリアイコン)"
 cp -R web/. "$RES/web/"
+cp AppIcon.icns "$RES/AppIcon.icns"
 
 echo "==> Info.plist 生成"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -40,6 +41,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>$DISP_NAME</string>
   <key>CFBundleDisplayName</key><string>$DISP_NAME</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>

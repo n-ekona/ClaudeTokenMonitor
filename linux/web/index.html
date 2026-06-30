@@ -5,7 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Claude Code トークン監視</title>
 <script src="chart.umd.min.js"></script>
+<script src="i18n.js"></script>
 <style>
+  /* ---- テーマ（既定値）----------------------------------------------------- */
+  /* 実際の配色は JS が documentElement にインラインで 10 変数を流し込む。      */
+  /* 下記 :root はフォールバック（JS 適用前の初期描画用）。                      */
   :root {
     --bg: #0f1419;
     --panel: #1a2027;
@@ -16,6 +20,8 @@
     --accent2: #6ba8d9;
     --green: #5fb878;
     --line: #2c343d;
+    --pip-bg: #0b0f14;
+    color-scheme: dark;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -23,7 +29,7 @@
     margin: 0;
     background: var(--bg);
     color: var(--text);
-    font-family: -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans CJK JP", Meiryo, sans-serif;
+    font-family: "Segoe UI", -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans CJK JP", Meiryo, sans-serif;
     user-select: none;
   }
   header {
@@ -34,7 +40,8 @@
     gap: 16px;
     flex-wrap: wrap;
   }
-  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; display:inline-flex; align-items:center; gap:8px; }
+  .brand-ico { display:block; flex:0 0 auto; }
   .meta { color: var(--muted); font-size: 12px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--green); margin-right:6px; transition: background .3s; }
   .dot.stale { background: var(--muted); }
@@ -42,7 +49,7 @@
   @keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(95,184,120,.6);} 100%{ box-shadow:0 0 0 8px rgba(95,184,120,0);} }
   main { padding: 22px; max-width: 1180px; margin: 0 auto; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 22px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; }
   .card .label { color: var(--muted); font-size: 12px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .04em; }
   .card .value { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; transition: color .2s; }
   .card .value.bumping { color: var(--green); }
@@ -51,7 +58,7 @@
   .value.cost { color: var(--accent); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
   @media (max-width: 860px){ .grid2 { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; margin-bottom: 22px; }
   .panel h2 { font-size: 14px; margin: 0 0 14px; font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
@@ -60,13 +67,15 @@
   tbody tr:hover { background: var(--panel2); }
   .name { font-weight: 600; }
   .controls { display:flex; align-items:center; gap:8px; margin-left:auto; }
-  .controls input { width: 58px; background: var(--panel2); border:1px solid var(--line); color: var(--text); border-radius:6px; padding:5px 8px; font-size:13px; }
-  .controls input#rate { width: 66px; }
-  .controls input#rate[readonly] { opacity:.7; cursor:default; }
-  .controls label { color: var(--muted); font-size:12px; }
-  .controls .chk { display:flex; align-items:center; gap:4px; cursor:pointer; }
-  .controls .chk input { width:auto; }
-  #rateInfo { font-size:11px; white-space:nowrap; }
+  .icon-btn {
+    background: var(--panel2); border:1px solid var(--line); color: var(--text);
+    border-radius:6px; padding:5px 10px; font-size:14px; cursor:pointer; line-height:1;
+    display:inline-flex; align-items:center; gap:5px;
+  }
+  .icon-btn:hover { border-color: var(--accent); }
+  /* ヘッダーのテーマボタン用カラーホイール（◉ドーナツ。中心はパネル色で抜く） */
+  .theme-ico { display:block; flex:0 0 auto; }
+  #themeBtn:hover .theme-ico { transform: rotate(30deg); transition: transform .25s ease; }
   .sep { width:1px; height:18px; background:var(--line); margin:0 4px; }
   canvas { max-height: 260px; }
   .legend { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; font-size:12px; color:var(--muted); }
@@ -78,58 +87,369 @@
   .hm-legend { display:flex; align-items:center; gap:4px; margin-top:10px; font-size:11px; color:var(--muted); }
   .hm-legend i { width:11px; height:11px; border-radius:2px; display:inline-block; }
   .hm-legend i.l0{background:#161b22}.hm-legend i.l1{background:#0e4429}.hm-legend i.l2{background:#006d32}.hm-legend i.l3{background:#26a641}.hm-legend i.l4{background:#39d353}
+
+  /* ---- 設定モーダル（左ナビ・タブ式） ------------------------------------- */
+  .modal-overlay {
+    display:none; position:fixed; inset:0; z-index:50;
+    background:rgba(0,0,0,.5); align-items:flex-start; justify-content:center;
+    padding:48px 16px; overflow-y:auto;
+  }
+  .modal-overlay.open { display:flex; }
+  .modal {
+    background:var(--panel); border:1px solid var(--line); border-radius:7px;
+    width:100%; max-width:680px; box-shadow:0 18px 50px rgba(0,0,0,.45); overflow:hidden;
+  }
+  .modal-head {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 18px; border-bottom:1px solid var(--line);
+  }
+  .modal-head h2 { margin:0; font-size:14px; font-weight:600; letter-spacing:.02em; }
+  .modal-close {
+    background:transparent; border:none; color:var(--muted); font-size:16px;
+    cursor:pointer; line-height:1; padding:4px 6px; border-radius:6px;
+  }
+  .modal-close:hover { color:var(--text); background:var(--panel2); }
+  /* レイアウト: 左ナビ + 右コンテンツ */
+  .modal-layout { display:flex; align-items:stretch; }
+  .set-nav {
+    display:flex; flex-direction:column; gap:2px; padding:12px;
+    border-right:1px solid var(--line); min-width:136px; flex-shrink:0;
+  }
+  .set-tab {
+    background:transparent; border:1px solid transparent; color:var(--muted);
+    text-align:left; padding:8px 12px; border-radius:6px; font-size:13px;
+    cursor:pointer; white-space:nowrap; transition:background .12s, color .12s;
+  }
+  .set-tab:hover { background:var(--panel2); color:var(--text); }
+  .set-tab.active { background:var(--panel2); color:var(--text); border-color:var(--line); font-weight:600; }
+  .set-content { flex:1; min-width:0; padding:6px 20px 18px; overflow-y:auto; max-height:64vh; }
+  .set-pane { display:none; }
+  .set-pane.active { display:block; }
+
+  .set-sec { padding:14px 0; border-bottom:1px solid var(--line); }
+  .set-sec:last-child { border-bottom:none; }
+  .set-sec h3 { margin:0 0 10px; font-size:12px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .set-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:8px 0; font-size:13px; }
+  .set-row > span:first-child { color:var(--text); }
+  .set-row.chk { cursor:pointer; }
+  .set-hint { color:var(--muted); font-size:11px; }
+  .set-row input[type="text"] { flex:1; }
+  .set-row input[type="text"], .set-row input[type="number"], .set-row select {
+    background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    border-radius:6px; padding:6px 8px; font-size:13px;
+  }
+  .set-row input[type="number"] { width:96px; }
+  .set-row input#rate[readonly] { opacity:.7; cursor:default; }
+  .set-row input[type="range"] { width:160px; }
+  .set-actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .btn {
+    background:var(--accent); border:1px solid var(--accent); color:#fff;
+    border-radius:7px; padding:6px 12px; font-size:12px; cursor:pointer;
+  }
+  .btn:hover { filter:brightness(1.07); }
+  .btn.ghost { background:transparent; color:var(--text); border-color:var(--line); }
+  .btn.ghost:hover { border-color:var(--accent); filter:none; }
+  .price-table { font-size:12px; margin-top:4px; }
+  .price-table th, .price-table td { padding:5px 8px; }
+  .price-table input { width:72px; background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:5px; padding:4px 6px; font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
+  .price-table tbody td:first-child { font-size:11px; color:var(--muted); }
+
+  /* ---- カスタムテーマ編集 ------------------------------------------------- */
+  .color-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px 18px; margin-top:8px; }
+  .color-row { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; margin:4px 0; }
+  .color-row input[type="color"] {
+    width:44px; height:26px; padding:0; border:1px solid var(--line);
+    border-radius:5px; background:var(--panel2); cursor:pointer; flex-shrink:0;
+  }
+  @media (max-width: 560px){ .color-grid { grid-template-columns:1fr; } }
+
+  /* レスポンシブ: 幅が狭いと左ナビを上部の横スクロールタブへ */
+  @media (max-width: 560px){
+    .modal-layout { flex-direction:column; }
+    .set-nav {
+      flex-direction:row; overflow-x:auto; gap:4px;
+      border-right:none; border-bottom:1px solid var(--line); min-width:0;
+    }
+    .set-content { max-height:60vh; }
+  }
+
+  /* ---- PiP（正方形）モード ------------------------------------------------ */
+  body.pip { overflow:hidden; background:var(--pip-bg); }
+  body.pip header, body.pip main { display:none; }
+  body.pip #pipView {
+    display:block; position:fixed; inset:0; cursor:move;
+    background: radial-gradient(120% 120% at 50% 35%, var(--panel) 0%, var(--pip-bg) 100%);
+  }
+  #pipView { display:none; }
+  /* 背景チャート層（薄く敷く・操作は透過） */
+  #pipView .pip-bg { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+  #pipView .pip-donut-wrap {
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-58%);
+    width:240px; height:240px; opacity:var(--pip-bg-opacity, .30);
+  }
+  #pipView .pip-bars-wrap {
+    position:absolute; left:8px; right:8px; bottom:8px; height:92px; opacity:calc(var(--pip-bg-opacity, .30) * .87);
+  }
+  /* 前景（数値）層 */
+  #pipView .pip-fg {
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    justify-content:center; align-items:center; text-align:center; padding:14px 16px;
+    pointer-events:none; /* ドラッグ優先。クリック可能要素のみ個別に有効化 */
+  }
+  #pipView .pip-exit {
+    position:absolute; top:8px; right:8px; z-index:3; pointer-events:auto; cursor:pointer;
+    background:rgba(20,27,36,.6); border:1px solid var(--line); color:var(--muted);
+    border-radius:6px; width:26px; height:26px; font-size:13px; line-height:1;
+  }
+  #pipView .pip-exit:hover { color:var(--text); border-color:var(--accent); }
+  #pipView .pip-status { font-size:11px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+  #pipView .pip-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-top:4px; }
+  #pipView .pip-m { color:var(--accent2); font-weight:700; font-variant-numeric:tabular-nums; margin-left:4px; }
+  /* 左上の過去7日アクティビティ。背景チャートより手前に出す */
+  #pipView .pip-grass {
+    position:absolute; top:9px; left:10px; z-index:2; pointer-events:none;
+    display:flex; align-items:center; gap:5px;
+  }
+  #pipView .pip-grass-lbl { font-size:9px; color:var(--muted); letter-spacing:.04em; }
+  #pipView .pip-grass-cells { display:flex; gap:3px; }
+  #pipView .pip-grass-cells i {
+    width:12px; height:12px; border-radius:2px; display:block;
+    outline:1px solid rgba(255,255,255,.06);
+  }
+  #pipView .pip-tokens {
+    font-size:clamp(18px,7vw,27px); font-weight:800; font-variant-numeric:tabular-nums;
+    line-height:1.1; color:var(--text); text-shadow:0 2px 12px rgba(0,0,0,.6);
+    white-space:nowrap;
+  }
+  #pipView .pip-cost {
+    font-size:clamp(20px,7vw,30px); font-weight:700; color:var(--accent);
+    font-variant-numeric:tabular-nums; margin-top:10px; text-shadow:0 2px 12px rgba(0,0,0,.6);
+  }
+  #pipView .pip-cost-jpy { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
 <header>
-  <h1>🔭 Claude Code トークン監視</h1>
-  <span class="meta"><span id="statusDot" class="dot"></span><span id="status">待機中…</span></span>
+  <h1><svg class="brand-ico" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><rect x="1" y="1" width="18" height="18" rx="4.5" fill="var(--accent)"/><rect x="5" y="11" width="2.6" height="4.5" rx="0.6" fill="#fff"/><rect x="8.7" y="8.5" width="2.6" height="7" rx="0.6" fill="#fff"/><rect x="12.4" y="6" width="2.6" height="9.5" rx="0.6" fill="#fff"/></svg><span data-i18n="app.title">Claude Code トークン監視</span></h1>
+  <span class="meta"><span id="statusDot" class="dot"></span><span id="status" data-i18n="status.waiting">待機中…</span></span>
   <span class="meta" id="projectsDir"></span>
   <div class="controls">
-    <label>更新</label><input id="interval" type="number" value="3" min="1" max="600" step="1" /><label>秒ごと</label>
-    <span class="sep"></span>
-    <label>1ドル=</label><input id="rate" type="number" value="155" min="1" step="0.01" /><label>円</label>
-    <label class="chk"><input id="rateAuto" type="checkbox" checked />自動</label>
-    <span class="meta" id="rateInfo"></span>
+    <button id="themeBtn" class="icon-btn" data-i18n-title="btn.theme" title="テーマ"><svg class="theme-ico" viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><path d="M10 10 L10 1 A9 9 0 0 1 17.79 5.5 Z" fill="#e5484d"/><path d="M10 10 L17.79 5.5 A9 9 0 0 1 17.79 14.5 Z" fill="#f5a623"/><path d="M10 10 L17.79 14.5 A9 9 0 0 1 10 19 Z" fill="#46a758"/><path d="M10 10 L10 19 A9 9 0 0 1 2.21 14.5 Z" fill="#2aa7c4"/><path d="M10 10 L2.21 14.5 A9 9 0 0 1 2.21 5.5 Z" fill="#3e63dd"/><path d="M10 10 L2.21 5.5 A9 9 0 0 1 10 1 Z" fill="#8e4ec6"/><circle cx="10" cy="10" r="3.4" fill="var(--panel2)"/></svg> <span id="themeBtnName"></span></button>
+    <button id="settingsBtn" class="icon-btn" data-i18n-title="btn.settings" title="設定">⚙ <span data-i18n="btn.settings">設定</span></button>
+    <button id="pipBtn" class="icon-btn" data-i18n-title="btn.pip" title="PiP">⛶ <span data-i18n="btn.pip">PiP</span></button>
   </div>
 </header>
+
+<!-- 設定モーダル（左ナビ・タブ式） -->
+<div id="settingsOverlay" class="modal-overlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 data-i18n="set.title">設定</h2>
+      <button id="settingsClose" class="modal-close" title="✕">✕</button>
+    </div>
+    <div class="modal-layout">
+      <nav class="set-nav">
+        <button class="set-tab active" data-tab="watch"   data-i18n="tab.watch">監視</button>
+        <button class="set-tab"        data-tab="display" data-i18n="tab.display">表示</button>
+        <button class="set-tab"        data-tab="fx"      data-i18n="tab.fx">為替</button>
+        <button class="set-tab"        data-tab="pricing" data-i18n="tab.pricing">単価</button>
+        <button class="set-tab"        data-tab="pip"     data-i18n="tab.pip">PiP</button>
+        <button class="set-tab"        data-tab="custom"  data-i18n="tab.custom">カスタム</button>
+      </nav>
+      <div class="set-content">
+        <!-- 監視 -->
+        <section class="set-pane active" data-pane="watch">
+          <div class="set-sec">
+            <h3 data-i18n="set.watch.head">監視対象</h3>
+            <div class="set-row">
+              <span data-i18n="set.watch.path">プロジェクトのパス</span>
+              <input id="projectsDirInput" type="text" spellcheck="false" placeholder="~/.claude/projects" />
+            </div>
+            <div class="set-row">
+              <span class="set-hint" data-i18n="set.watch.hint">空欄なら既定（~/.claude/projects）</span>
+            </div>
+            <div class="set-actions">
+              <button id="applyDirBtn" class="btn" data-i18n="set.watch.apply">適用して再スキャン</button>
+              <button id="rescanBtn" class="btn ghost" data-i18n="set.watch.rescan">再スキャン / リセット</button>
+            </div>
+          </div>
+          <div class="set-sec">
+            <div class="set-row">
+              <span data-i18n="set.interval">更新間隔（秒）</span>
+              <input id="interval" type="number" value="3" min="1" max="600" step="1" />
+            </div>
+          </div>
+        </section>
+
+        <!-- 表示 -->
+        <section class="set-pane" data-pane="display">
+          <div class="set-sec">
+            <h3 data-i18n="set.display.head">表示</h3>
+            <div class="set-row">
+              <span data-i18n="set.theme">テーマ</span>
+              <select id="themeSel"></select>
+            </div>
+            <div class="set-row">
+              <span data-i18n="set.language">言語</span>
+              <select id="langSel"></select>
+            </div>
+            <div class="set-row">
+              <span data-i18n="set.defaultRange">既定の日数レンジ</span>
+              <select id="defRangeSel">
+                <option value="7"  data-i18n="range.7">直近7日</option>
+                <option value="14" data-i18n="range.14">直近14日</option>
+                <option value="30" data-i18n="range.30">直近30日</option>
+              </select>
+            </div>
+            <label class="set-row chk"><span data-i18n="set.showFx">為替換算を表示</span><input id="showFx" type="checkbox" checked /></label>
+            <label class="set-row chk"><span data-i18n="set.compact">大きな数値を省略表示（K/M/B）</span><input id="compactNums" type="checkbox" /></label>
+          </div>
+        </section>
+
+        <!-- 為替 -->
+        <section class="set-pane" data-pane="fx">
+          <div class="set-sec">
+            <h3 data-i18n="set.fx.head">為替（USD 換算）</h3>
+            <div class="set-row">
+              <span data-i18n="set.fx.currency">表示通貨</span>
+              <select id="currencySel"></select>
+            </div>
+            <div class="set-row">
+              <span data-i18n="set.fx.rate">1 USD ＝</span>
+              <span style="display:flex; align-items:center; gap:6px;">
+                <input id="rate" type="number" value="155" min="0" step="0.01" />
+                <span class="set-hint" id="rateUnit">JPY</span>
+              </span>
+            </div>
+            <label class="set-row chk">
+              <span data-i18n="set.fx.auto">自動取得</span>
+              <input id="rateAuto" type="checkbox" checked />
+            </label>
+            <div class="set-row"><span class="set-hint" id="rateInfo"></span></div>
+          </div>
+        </section>
+
+        <!-- 単価 -->
+        <section class="set-pane" data-pane="pricing">
+          <div class="set-sec">
+            <h3 data-i18n="set.pricing.head">モデル単価（per MTok・USD）</h3>
+            <div class="set-hint" data-i18n="set.pricing.hint">入力 / 出力の単価を上書きできます。適用すると再集計します。</div>
+            <table class="price-table">
+              <thead><tr><th data-i18n="th.model">モデル</th><th data-i18n="th.input">入力</th><th data-i18n="th.output">出力</th></tr></thead>
+              <tbody id="priceBody"></tbody>
+            </table>
+            <div class="set-actions">
+              <button id="applyPriceBtn" class="btn" data-i18n="set.pricing.apply">適用して再計算</button>
+              <button id="resetPriceBtn" class="btn ghost" data-i18n="set.pricing.reset">既定に戻す</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- PiP -->
+        <section class="set-pane" data-pane="pip">
+          <div class="set-sec">
+            <h3 data-i18n="set.pip.head">PiP（正方形）モード</h3>
+            <label class="set-row chk"><span data-i18n="set.pip.startInPip">起動時に PiP で開始</span><input id="startInPip" type="checkbox" /></label>
+            <div class="set-row">
+              <span data-i18n="set.pip.size">サイズ（px）</span>
+              <input id="pipSize" type="number" value="320" min="240" max="520" step="10" />
+            </div>
+            <div class="set-row">
+              <span data-i18n="set.pip.opacity">背景チャートの濃さ</span>
+              <input id="pipOpacity" type="range" min="0" max="100" value="30" />
+            </div>
+          </div>
+        </section>
+
+        <!-- カスタム -->
+        <section class="set-pane" data-pane="custom">
+          <div class="set-sec">
+            <h3 data-i18n="set.custom.head">カスタムテーマ</h3>
+            <div class="set-hint" data-i18n="set.custom.hint">各色を個別に設定できます。</div>
+            <div class="set-row" style="margin-top:10px;">
+              <span data-i18n="set.custom.base">ベース（明るさ）</span>
+              <select id="cc-base">
+                <option value="dark"  data-i18n="base.dark">ダーク</option>
+                <option value="light" data-i18n="base.light">ライト</option>
+              </select>
+            </div>
+            <div class="color-grid">
+              <label class="color-row"><span data-i18n="color.bg">背景</span><input type="color" id="cc-bg" /></label>
+              <label class="color-row"><span data-i18n="color.panel">パネル</span><input type="color" id="cc-panel" /></label>
+              <label class="color-row"><span data-i18n="color.panel2">パネル(副)</span><input type="color" id="cc-panel2" /></label>
+              <label class="color-row"><span data-i18n="color.text">文字</span><input type="color" id="cc-text" /></label>
+              <label class="color-row"><span data-i18n="color.muted">補助文字</span><input type="color" id="cc-muted" /></label>
+              <label class="color-row"><span data-i18n="color.accent">アクセント1</span><input type="color" id="cc-accent" /></label>
+              <label class="color-row"><span data-i18n="color.accent2">アクセント2</span><input type="color" id="cc-accent2" /></label>
+              <label class="color-row"><span data-i18n="color.green">アクティブ</span><input type="color" id="cc-green" /></label>
+              <label class="color-row"><span data-i18n="color.line">境界線</span><input type="color" id="cc-line" /></label>
+              <label class="color-row"><span data-i18n="color.pipBg">PiP背景</span><input type="color" id="cc-pipbg" /></label>
+            </div>
+            <div class="set-actions">
+              <button id="copyThemeBtn" class="btn ghost" data-i18n="set.custom.copy">現在の配色をコピー</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 正方形（PiP）モードの表示。body.pip のときだけ表示される -->
+<div id="pipView">
+  <!-- 背景: モデル別の円グラフ＋プロジェクト別の帯グラフ（薄く敷く） -->
+  <div class="pip-bg">
+    <div class="pip-donut-wrap"><canvas id="pipDonut"></canvas></div>
+    <div class="pip-bars-wrap"><canvas id="pipBars"></canvas></div>
+  </div>
+  <button class="pip-exit" id="pipExit" title="⤢">⤢</button>
+  <!-- 左上に過去7日のアクティビティを前景表示 -->
+  <div class="pip-grass" id="pipGrass"><span class="pip-grass-lbl" data-i18n="pip.days7">7日</span><span class="pip-grass-cells" id="pipGrassCells"></span></div>
+  <div class="pip-fg">
+    <div class="pip-status"><span id="pipDot" class="dot"></span><span id="pipStatus" data-i18n="status.waiting">待機中…</span></div>
+    <div class="pip-tokens" id="pipTokens">–</div>
+    <div class="pip-label"><span data-i18n="pip.totalTokens">総トークン</span> <span class="pip-m" id="pipTokensM"></span></div>
+    <div class="pip-cost" id="pipCost">–</div>
+    <div class="pip-cost-jpy" id="pipCostJpy"></div>
+  </div>
+</div>
 <main>
   <div class="cards">
     <div class="card">
-      <div class="label">総トークン数</div>
+      <div class="label" data-i18n="card.totalTokens">総トークン数</div>
       <div class="value" id="totalTokens">–</div>
       <div class="sub" id="totalBreakdown"></div>
     </div>
     <div class="card">
-      <div class="label">推定コスト</div>
+      <div class="label" data-i18n="card.estCost">推定コスト</div>
       <div class="value cost" id="totalCostUsd">–</div>
       <div class="sub" id="totalCostJpy"></div>
     </div>
     <div class="card">
-      <div class="label">入力 / 出力</div>
+      <div class="label" data-i18n="card.io">入力 / 出力</div>
       <div class="value" id="ioTokens">–</div>
       <div class="sub" id="ioSub"></div>
     </div>
     <div class="card">
-      <div class="label">キャッシュ (書込 / 読込)</div>
+      <div class="label" data-i18n="card.cache">キャッシュ (書込 / 読込)</div>
       <div class="value" id="cacheTokens">–</div>
       <div class="sub" id="cacheSub"></div>
     </div>
   </div>
 
   <div class="panel">
-    <h2>アクティビティ（草）</h2>
+    <h2 data-i18n="panel.activity">アクティビティ</h2>
     <div id="heatmap" class="hm-scroll"></div>
-    <div class="hm-legend"><span>少</span><i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><span>多</span></div>
+    <div class="hm-legend"><span data-i18n="hm.less">少</span><i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><span data-i18n="hm.more">多</span></div>
     <div class="legend" id="hmSummary"></div>
   </div>
 
   <div class="panel">
-    <h2>日別の使用量
+    <h2><span data-i18n="panel.daily">日別の使用量</span>
       <select id="dayRange">
-        <option value="7">直近7日</option>
-        <option value="14">直近14日</option>
-        <option value="30">直近30日</option>
+        <option value="7"  data-i18n="range.7">直近7日</option>
+        <option value="14" data-i18n="range.14">直近14日</option>
+        <option value="30" data-i18n="range.30">直近30日</option>
       </select>
     </h2>
     <canvas id="dailyChart"></canvas>
@@ -138,31 +458,31 @@
 
   <div class="grid2">
     <div class="panel">
-      <h2>モデル別トークン</h2>
+      <h2 data-i18n="panel.modelTokens">モデル別トークン</h2>
       <canvas id="modelChart"></canvas>
       <div class="legend" id="modelLegend"></div>
     </div>
     <div class="panel">
-      <h2>プロジェクト別トークン</h2>
+      <h2 data-i18n="panel.projectTokens">プロジェクト別トークン</h2>
       <canvas id="projectChart"></canvas>
     </div>
   </div>
 
   <div class="panel">
-    <h2>モデル別 内訳</h2>
+    <h2 data-i18n="panel.modelBreakdown">モデル別 内訳</h2>
     <table>
       <thead>
-        <tr><th>モデル</th><th>合計</th><th>入力</th><th>出力</th><th>Cache書込</th><th>Cache読込</th><th>メッセージ</th><th>コスト</th></tr>
+        <tr><th data-i18n="th.model">モデル</th><th data-i18n="th.total">合計</th><th data-i18n="th.input">入力</th><th data-i18n="th.output">出力</th><th data-i18n="th.cacheWrite">Cache書込</th><th data-i18n="th.cacheRead">Cache読込</th><th data-i18n="th.messages">メッセージ</th><th data-i18n="th.cost">コスト</th></tr>
       </thead>
       <tbody id="modelTable"></tbody>
     </table>
   </div>
 
   <div class="panel">
-    <h2>プロジェクト別 内訳</h2>
+    <h2 data-i18n="panel.projectBreakdown">プロジェクト別 内訳</h2>
     <table>
       <thead>
-        <tr><th>プロジェクト</th><th>合計トークン</th><th>メッセージ</th><th>コスト</th></tr>
+        <tr><th data-i18n="th.project">プロジェクト</th><th data-i18n="th.totalTokens">合計トークン</th><th data-i18n="th.messages">メッセージ</th><th data-i18n="th.cost">コスト</th></tr>
       </thead>
       <tbody id="projectTable"></tbody>
     </table>
@@ -171,36 +491,343 @@
 
 <script>
 const COLORS = ['#d97757','#6ba8d9','#5fb878','#c9a45c','#a978d9','#d96b9a','#5fc4c4','#9aa0aa'];
-let jpyRate = 155;
 let lastData = null;
 let intervalInitialized = false;
 
-// ---- ネイティブ橋渡し (mac WKWebView / linux WebKitGTK 共通) -----------------
-// どちらの WebKit も window.webkit.messageHandlers.<name>.postMessage で JS→ネイティブ、
-// ネイティブ→JS は evaluateJavaScript("window.__recv(<json>)") で行う。
+// ===== 多言語化（i18n）====================================================
+const LANGS = ['ja','en','zh-Hant','zh-Hans','ko','fr','es','de','pt','it','ru'];
+const LANG_LABELS = {
+  'ja':'日本語','en':'English','zh-Hant':'繁體中文','zh-Hans':'简体中文','ko':'한국어',
+  'fr':'Français','es':'Español','de':'Deutsch','pt':'Português','it':'Italiano','ru':'Русский'
+};
+function detectLang(){
+  try { const s = localStorage.getItem('lang'); if (s && LANGS.indexOf(s) >= 0) return s; } catch (_) {}
+  const nav = (navigator.language || navigator.userLanguage || 'ja');
+  const low = String(nav).toLowerCase();
+  if (low.indexOf('zh') === 0){
+    if (low.indexOf('tw') >= 0 || low.indexOf('hk') >= 0 || low.indexOf('mo') >= 0 || low.indexOf('hant') >= 0) return 'zh-Hant';
+    return 'zh-Hans';
+  }
+  const two = low.split('-')[0];
+  const m = LANGS.filter(l => l.toLowerCase() === two || l.toLowerCase().split('-')[0] === two)[0];
+  return m || 'ja';
+}
+let lang = detectLang();
+// 辞書参照。未定義キーは ja → キー名の順にフォールバック。{name} を params で置換。
+function t(key, params){
+  const I = window.I18N || {};
+  const dict = I[lang] || I.ja || {};
+  let s = (dict[key] != null) ? dict[key]
+        : ((I.ja && I.ja[key] != null) ? I.ja[key] : key);
+  if (params){ for (const k in params){ s = s.split('{'+k+'}').join(params[k]); } }
+  return s;
+}
+// 静的要素を一括翻訳。textContent / placeholder / title をそれぞれ走査。
+function translatePage(){
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.getAttribute('data-i18n')); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.setAttribute('placeholder', t(el.getAttribute('data-i18n-ph'))); });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => { el.setAttribute('title', t(el.getAttribute('data-i18n-title'))); });
+}
+function buildLangOptions(){
+  const sel = document.getElementById('langSel');
+  sel.innerHTML = LANGS.map(l => `<option value="${l}">${LANG_LABELS[l]}</option>`).join('');
+  sel.value = lang;
+}
+function setLang(l){
+  lang = l;
+  try { localStorage.setItem('lang', l); } catch (_) {}
+  document.documentElement.setAttribute('lang', l);
+  buildThemeOptions();     // system/light/dark/custom のラベルが言語依存
+  syncThemeControls();     // ヘッダーのテーマ名
+  translatePage();
+  applyChartI18n();
+  if (lastData) render(lastData);  // 動的文字列の再生成
+}
+
+// ---- 表示通貨（USD からの換算先）----------------------------------------
+const CURRENCIES = [
+  { code:'JPY', label:'日本円 (JPY)' },
+  { code:'USD', label:'米ドル (USD)' },
+  { code:'EUR', label:'ユーロ (EUR)' },
+  { code:'GBP', label:'英ポンド (GBP)' },
+  { code:'CNY', label:'人民元 (CNY)' },
+  { code:'KRW', label:'韓国ウォン (KRW)' },
+  { code:'TWD', label:'新台湾ドル (TWD)' },
+  { code:'HKD', label:'香港ドル (HKD)' },
+  { code:'SGD', label:'シンガポールドル (SGD)' },
+  { code:'INR', label:'インドルピー (INR)' },
+  { code:'AUD', label:'豪ドル (AUD)' },
+  { code:'CAD', label:'カナダドル (CAD)' },
+  { code:'CHF', label:'スイスフラン (CHF)' },
+  { code:'BRL', label:'ブラジルレアル (BRL)' },
+];
+let currency = 'JPY';
+let fxRate = 155;   // 1 USD = fxRate（選択通貨）。USD 選択時は 1。
+
+// 既定のモデル単価（per MTok: 入力, 出力）。バックエンドの組込み値と一致させる。
+const DEFAULT_PRICING = [
+  { key:'claude-fable-5', in:10, out:50 },
+  { key:'claude-mythos-5', in:10, out:50 },
+  { key:'claude-opus-4-8', in:5, out:25 },
+  { key:'claude-opus-4-7', in:5, out:25 },
+  { key:'claude-opus-4-6', in:5, out:25 },
+  { key:'claude-opus-4-5', in:5, out:25 },
+  { key:'claude-opus-4-1', in:15, out:75 },
+  { key:'claude-opus-4-0', in:15, out:75 },
+  { key:'claude-sonnet-4-6', in:3, out:15 },
+  { key:'claude-sonnet-4-5', in:3, out:15 },
+  { key:'claude-sonnet-4-0', in:3, out:15 },
+  { key:'claude-haiku-4-5', in:1, out:5 },
+  { key:'claude-3-5-haiku', in:0.8, out:4 },
+  { key:'claude-3-haiku', in:0.25, out:1.25 },
+];
+
+// ---- ネイティブ橋渡し（Windows WebView2 / mac WKWebView / linux WebKitGTK 共通）----
+// 送信: WebView2 は chrome.webview.postMessage、WebKit 系は webkit.messageHandlers。
+// 受信: WebView2 は message イベント、WebKit 系は window.__recv 経由。
 function sendToNative(msg){
   try {
-    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tokenmonitor){
+    if (window.chrome && window.chrome.webview){
+      window.chrome.webview.postMessage(msg);
+    } else if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tokenmonitor){
       window.webkit.messageHandlers.tokenmonitor.postMessage(msg);
     }
   } catch (_) { /* ブリッジ未接続(ブラウザ単体表示など)は無視 */ }
 }
-// ネイティブ側が N秒ごとにスナップショットを渡す入口
 window.__recv = function(d){
   try { render(typeof d === 'string' ? JSON.parse(d) : d); } catch (_) {}
 };
 
-// ---- 円相場(USD/JPY)のリアルタイム取得 ----------------------------------
+// ---- 表示オプション（localStorage 所有） --------------------------------
+let showFx = true;
+let compactMode = false;
+
+// ===== テーマシステム =====================================================
+// 各プリセットは 5 色 + base を定義し、残りの CSS 変数を導出する。
+// custom は導出を使わず 10 変数をそのまま適用。適用時は base を native へ通知。
+const THEME_PRESETS = {
+  dark:       { base:'dark',  bg:'#0f1419', panel:'#1a2027', accent:'#d97757', accent2:'#6ba8d9', text:'#e6e9ee', labelKey:'theme.dark' },
+  light:      { base:'light', bg:'#f4f6f9', panel:'#ffffff', accent:'#c85f3c', accent2:'#3f7fb8', text:'#1b2430', labelKey:'theme.light' },
+  midnight:   { base:'dark',  bg:'#0b1020', panel:'#141b30', accent:'#6c8cff', accent2:'#a0b4ff', text:'#dfe6ff', label:'Midnight' },
+  nord:       { base:'dark',  bg:'#2e3440', panel:'#3b4252', accent:'#88c0d0', accent2:'#81a1c1', text:'#eceff4', label:'Nord' },
+  solarized:  { base:'dark',  bg:'#002b36', panel:'#073642', accent:'#b58900', accent2:'#2aa198', text:'#93a1a1', label:'Solarized' },
+  rose:       { base:'light', bg:'#fff1f3', panel:'#ffffff', accent:'#c25d78', accent2:'#d98a9e', text:'#4a2e35', label:'Rosé' },
+  forest:     { base:'dark',  bg:'#14201a', panel:'#1c2c24', accent:'#6db580', accent2:'#9cc4a0', text:'#dce8df', label:'Forest' },
+  catppuccin: { base:'dark',  bg:'#1e1e2e', panel:'#313244', accent:'#cba6f7', accent2:'#f5c2e7', text:'#cdd6f4', label:'Catppuccin Mocha' },
+  tokyonight: { base:'dark',  bg:'#1a1b26', panel:'#24283b', accent:'#7aa2f7', accent2:'#bb9af7', text:'#c0caf5', label:'Tokyo Night' },
+  rosepine:   { base:'dark',  bg:'#191724', panel:'#26233a', accent:'#c4a7e7', accent2:'#ebbcba', text:'#e0def4', label:'Rosé Pine' },
+  everforest: { base:'dark',  bg:'#2d353b', panel:'#3a464c', accent:'#a7c080', accent2:'#e69875', text:'#d3c6aa', label:'Everforest' },
+  gruvbox:    { base:'dark',  bg:'#282828', panel:'#3c3836', accent:'#d8a657', accent2:'#89b482', text:'#ebdbb2', label:'Gruvbox' },
+  sepia:      { base:'light', bg:'#f4ecd8', panel:'#e6d9bf', accent:'#c19a6b', accent2:'#b07d62', text:'#5c4b37', label:'Sepia / Lo-Fi' },
+  seafoam:    { base:'dark',  bg:'#102a2c', panel:'#1a3b3d', accent:'#5dcaa5', accent2:'#80cbc4', text:'#d4e9e7', label:'Seafoam / Aqua' },
+  lavender:   { base:'dark',  bg:'#1c1a2e', panel:'#2a2742', accent:'#b4a7e8', accent2:'#d4b8e8', text:'#e4e0f5', label:'Lavender / Moonlight' },
+};
+// system / custom を含む循環順。ヘッダーのボタンはこの順で切り替える。
+const THEME_CYCLE = ['system','light','dark','midnight','nord','solarized','rose','forest',
+  'catppuccin','tokyonight','rosepine','everforest','gruvbox','sepia','seafoam','lavender','custom'];
+
+const DEFAULT_CUSTOM = {
+  base:'dark', bg:'#0f1419', panel:'#1a2027', panel2:'#222a33', text:'#e6e9ee',
+  muted:'#8a94a3', accent:'#d97757', accent2:'#6ba8d9', green:'#5fb878', line:'#2c343d', 'pip-bg':'#0b0f14'
+};
+// カスタム編集フィールド: [変数キー, input要素id]
+const CUSTOM_FIELDS = [
+  ['bg','cc-bg'], ['panel','cc-panel'], ['panel2','cc-panel2'], ['text','cc-text'], ['muted','cc-muted'],
+  ['accent','cc-accent'], ['accent2','cc-accent2'], ['green','cc-green'], ['line','cc-line'], ['pip-bg','cc-pipbg'],
+];
+
+let currentThemeId = 'system';
+const themeSel = document.getElementById('themeSel');
+const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+// ---- 色のミックス（hex→rgb→hex）----------------------------------------
+function normHex(c){
+  if (!c) return '#000000';
+  c = String(c).trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
+  if (/^#[0-9a-fA-F]{3}$/.test(c)) return ('#'+c[1]+c[1]+c[2]+c[2]+c[3]+c[3]).toLowerCase();
+  return '#000000';
+}
+function hexToRgb(h){
+  h = normHex(h).slice(1);
+  return { r:parseInt(h.slice(0,2),16), g:parseInt(h.slice(2,4),16), b:parseInt(h.slice(4,6),16) };
+}
+function rgbToHex(r,g,b){
+  const f = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2,'0');
+  return '#' + f(r) + f(g) + f(b);
+}
+function mix(a, b, ratio){
+  const A = hexToRgb(a), B = hexToRgb(b);
+  return rgbToHex(A.r + (B.r - A.r) * ratio, A.g + (B.g - A.g) * ratio, A.b + (B.b - A.b) * ratio);
+}
+// プリセット 5 色 + base から 10 変数を導出。
+function deriveTheme(p){
+  const towards = p.base === 'dark' ? '#ffffff' : '#000000';
+  return {
+    bg: p.bg,
+    panel: p.panel,
+    panel2: mix(p.panel, towards, 0.06),
+    line:   mix(p.panel, towards, 0.14),
+    text: p.text,
+    muted:  mix(p.text, p.bg, 0.42),
+    accent: p.accent,
+    accent2: p.accent2,
+    green: p.green || (p.base === 'dark' ? '#5fb878' : '#3f9d5a'),
+    'pip-bg': p.bg,
+  };
+}
+// 10 変数をインラインで適用 + colorScheme + native 通知 + チャート追従。
+function applyVars(v, base){
+  const s = document.documentElement.style;
+  s.setProperty('--bg', v.bg);
+  s.setProperty('--panel', v.panel);
+  s.setProperty('--panel2', v.panel2);
+  s.setProperty('--line', v.line);
+  s.setProperty('--text', v.text);
+  s.setProperty('--muted', v.muted);
+  s.setProperty('--accent', v.accent);
+  s.setProperty('--accent2', v.accent2);
+  s.setProperty('--green', v.green);
+  s.setProperty('--pip-bg', v['pip-bg']);
+  document.documentElement.style.colorScheme = base;   // スクロールバー等を追従
+  document.documentElement.setAttribute('data-theme', base);
+  sendToNative(JSON.stringify({ type:'theme', mode: base }));  // 解決後の dark/light のみ通知
+  applyChartTheme();  // 初期化前は no-op
+}
+function resolveThemeId(id){
+  if (id === 'system') return (mq && mq.matches) ? 'dark' : 'light';
+  return id;
+}
+function themeLabel(id){
+  if (id === 'system') return t('theme.system');
+  if (id === 'light')  return t('theme.light');
+  if (id === 'dark')   return t('theme.dark');
+  if (id === 'custom') return t('theme.custom');
+  const p = THEME_PRESETS[id];
+  return (p && p.label) || id;
+}
+function loadCustomTheme(){
+  try {
+    const raw = localStorage.getItem('customTheme');
+    if (raw){ const o = JSON.parse(raw); return Object.assign({}, DEFAULT_CUSTOM, o); }
+  } catch (_) {}
+  return Object.assign({}, DEFAULT_CUSTOM);
+}
+function saveCustomTheme(o){
+  try { localStorage.setItem('customTheme', JSON.stringify(o)); } catch (_) {}
+}
+// 現在の currentThemeId に応じて配色を適用し、UI を同期。
+function renderTheme(){
+  let base, vars;
+  if (currentThemeId === 'custom'){
+    const c = loadCustomTheme();
+    base = (c.base === 'light') ? 'light' : 'dark';
+    vars = c; // 10 変数を保持
+  } else {
+    const rid = resolveThemeId(currentThemeId);
+    const p = THEME_PRESETS[rid] || THEME_PRESETS.dark;
+    base = p.base;
+    vars = deriveTheme(p);
+  }
+  applyVars(vars, base);
+  syncThemeControls();
+}
+function syncThemeControls(){
+  if (themeSel) themeSel.value = currentThemeId;
+  const nm = document.getElementById('themeBtnName');
+  if (nm) nm.textContent = themeLabel(currentThemeId);
+}
+function selectTheme(id){
+  currentThemeId = id;
+  try { localStorage.setItem('theme', id); } catch (_) {}
+  renderTheme();
+}
+function buildThemeOptions(){
+  if (!themeSel) return;
+  themeSel.innerHTML = THEME_CYCLE.map(id => `<option value="${id}">${themeLabel(id)}</option>`).join('');
+  themeSel.value = currentThemeId;
+}
+// 設定の select。ヘッダーのボタンと双方向同期。
+themeSel.addEventListener('change', () => selectTheme(themeSel.value));
+// ヘッダーの専用ボタン: クリックで循環。
+document.getElementById('themeBtn').addEventListener('click', () => {
+  let i = THEME_CYCLE.indexOf(currentThemeId);
+  if (i < 0) i = 0;
+  selectTheme(THEME_CYCLE[(i + 1) % THEME_CYCLE.length]);
+});
+// OS のダーク/ライト切替: system のときだけ追従。
+if (mq){
+  const onSysChange = () => { if (currentThemeId === 'system') renderTheme(); };
+  if (mq.addEventListener) mq.addEventListener('change', onSysChange);
+  else if (mq.addListener) mq.addListener(onSysChange);
+}
+
+// ---- カスタムテーマ編集 --------------------------------------------------
+function fillCustomEditor(){
+  const c = loadCustomTheme();
+  const baseEl = document.getElementById('cc-base');
+  if (baseEl) baseEl.value = (c.base === 'light') ? 'light' : 'dark';
+  for (const [k, id] of CUSTOM_FIELDS){
+    const el = document.getElementById(id);
+    if (el) el.value = normHex(c[k] || DEFAULT_CUSTOM[k]);
+  }
+}
+function collectCustom(){
+  const baseEl = document.getElementById('cc-base');
+  const o = { base: (baseEl && baseEl.value === 'light') ? 'light' : 'dark' };
+  for (const [k, id] of CUSTOM_FIELDS){
+    const el = document.getElementById(id);
+    o[k] = el ? normHex(el.value) : DEFAULT_CUSTOM[k];
+  }
+  return o;
+}
+function onCustomEdit(){
+  saveCustomTheme(collectCustom());
+  if (currentThemeId === 'custom') renderTheme();  // 編集中テーマなら即時反映
+}
+CUSTOM_FIELDS.forEach(([, id]) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('input', onCustomEdit);
+});
+(function(){ const b = document.getElementById('cc-base'); if (b) b.addEventListener('change', onCustomEdit); })();
+// 現在の配色をカスタムへコピー（任意機能）。コピー後は custom を選択。
+document.getElementById('copyThemeBtn').addEventListener('click', () => {
+  const baseNow = (resolveThemeId(currentThemeId) === 'light'
+    || (currentThemeId === 'custom' && loadCustomTheme().base === 'light')) ? 'light' : 'dark';
+  const o = {
+    base: baseNow,
+    bg: normHex(cssVar('--bg')), panel: normHex(cssVar('--panel')), panel2: normHex(cssVar('--panel2')),
+    text: normHex(cssVar('--text')), muted: normHex(cssVar('--muted')), accent: normHex(cssVar('--accent')),
+    accent2: normHex(cssVar('--accent2')), green: normHex(cssVar('--green')), line: normHex(cssVar('--line')),
+    'pip-bg': normHex(cssVar('--pip-bg')),
+  };
+  saveCustomTheme(o);
+  fillCustomEditor();
+  selectTheme('custom');
+});
+
+// ===== 設定モーダルのタブ切替 =============================================
+document.querySelectorAll('.set-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const name = tab.getAttribute('data-tab');
+    document.querySelectorAll('.set-tab').forEach(b => b.classList.toggle('active', b === tab));
+    document.querySelectorAll('.set-pane').forEach(p => p.classList.toggle('active', p.getAttribute('data-pane') === name));
+  });
+});
+
+// ---- 為替(USD→選択通貨)のリアルタイム取得 -------------------------------
 const rateEl = document.getElementById('rate');
 const rateAutoEl = document.getElementById('rateAuto');
 const rateInfoEl = document.getElementById('rateInfo');
+const currencySel = document.getElementById('currencySel');
+const rateUnitEl = document.getElementById('rateUnit');
 
-// 無料・APIキー不要・CORS許可のソース（上から順に試す）
+// 無料・APIキー不要・CORS許可のソース（上から順に試す）。選択通貨のレートを拾う。
 const RATE_SOURCES = [
   { url: 'https://open.er-api.com/v6/latest/USD',
-    pick: (j) => (j && j.result === 'success' && j.rates) ? j.rates.JPY : null },
+    pick: (j) => (j && j.result === 'success' && j.rates) ? j.rates[currency] : null },
   { url: 'https://api.exchangerate-api.com/v4/latest/USD',
-    pick: (j) => (j && j.rates) ? j.rates.JPY : null },
+    pick: (j) => (j && j.rates) ? j.rates[currency] : null },
 ];
 
 function fmtClock(){
@@ -210,6 +837,7 @@ function fmtClock(){
 }
 
 async function fetchRateOnce(){
+  if (currency === 'USD') return 1; // 換算不要
   for (const s of RATE_SOURCES){
     try {
       const r = await fetch(s.url, { cache: 'no-store' });
@@ -223,37 +851,65 @@ async function fetchRateOnce(){
 }
 
 async function refreshRate(){
+  if (currency === 'USD'){ fxRate = 1; rateEl.value = '1'; rateInfoEl.textContent = t('fx.usdNote'); return; }
   if (!rateAutoEl.checked) return;
-  rateInfoEl.textContent = '取得中…';
+  rateInfoEl.textContent = t('fx.fetching');
   const rate = await fetchRateOnce();
   if (rate){
-    jpyRate = rate;
+    fxRate = rate;
     rateEl.value = rate.toFixed(2);
-    rateInfoEl.textContent = `自動更新 ${fmtClock()}`;
-    try { localStorage.setItem('jpyRate', String(rate)); } catch (_) {}
+    rateInfoEl.textContent = t('fx.autoUpdated', { time: fmtClock() });
+    try { localStorage.setItem('fxRate_' + currency, String(rate)); } catch (_) {}
   } else {
-    rateInfoEl.textContent = '取得失敗・前回値を使用';
+    rateInfoEl.textContent = t('fx.failed');
   }
 }
 
+// 通貨選択の入れ替え
+function buildCurrencyOptions(){
+  currencySel.innerHTML = CURRENCIES.map(c => `<option value="${c.code}">${c.label}</option>`).join('');
+}
+function updateRateUnit(){ if (rateUnitEl) rateUnitEl.textContent = currency; }
+function applyCachedRate(){
+  if (currency === 'USD'){ fxRate = 1; rateEl.value = '1'; return; }
+  try {
+    const c = parseFloat(localStorage.getItem('fxRate_' + currency));
+    if (isFinite(c) && c > 0){ fxRate = c; rateEl.value = c.toFixed(2); }
+  } catch (_) {}
+}
+currencySel.addEventListener('change', () => {
+  currency = currencySel.value;
+  try { localStorage.setItem('currency', currency); } catch (_) {}
+  updateRateUnit();
+  applyCachedRate();
+  const usd = (currency === 'USD');
+  rateEl.readOnly = usd ? true : rateAutoEl.checked;
+  refreshRate();          // 自動なら新通貨で取得、USD なら 1 を設定
+  if (lastData) render(lastData); // 表示通貨を即時反映
+});
+
 // 手動編集したら自動更新を解除し、入力値を尊重する
 rateEl.addEventListener('input', (e) => {
-  jpyRate = parseFloat(e.target.value) || 0;
-  if (rateAutoEl.checked){ rateAutoEl.checked = false; rateEl.readOnly = false; rateInfoEl.textContent = '手動'; }
+  fxRate = parseFloat(e.target.value) || 0;
+  if (rateAutoEl.checked){ rateAutoEl.checked = false; rateEl.readOnly = false; rateInfoEl.textContent = t('fx.manual'); }
 });
 
 rateAutoEl.addEventListener('change', () => {
   if (rateAutoEl.checked){ rateEl.readOnly = true; refreshRate(); }
-  else { rateEl.readOnly = false; rateInfoEl.textContent = '手動'; }
+  else { rateEl.readOnly = false; rateInfoEl.textContent = t('fx.manual'); }
 });
 
-// 起動時: 前回取得値があれば即適用 → APIで更新。以後30分ごとに更新。
+// 起動時: 通貨を復元 → 前回取得値があれば即適用 → APIで更新。以後30分ごとに更新。
 (function initRate(){
+  buildCurrencyOptions();
   try {
-    const cached = parseFloat(localStorage.getItem('jpyRate'));
-    if (isFinite(cached) && cached > 0){ jpyRate = cached; rateEl.value = cached.toFixed(2); }
+    const savedCur = localStorage.getItem('currency');
+    if (savedCur && CURRENCIES.some(c => c.code === savedCur)) currency = savedCur;
   } catch (_) {}
-  rateEl.readOnly = rateAutoEl.checked;
+  currencySel.value = currency;
+  updateRateUnit();
+  applyCachedRate();
+  rateEl.readOnly = (currency === 'USD') ? true : rateAutoEl.checked;
   refreshRate();
   setInterval(refreshRate, 30 * 60 * 1000);
 })();
@@ -269,17 +925,139 @@ document.getElementById('interval').addEventListener('change', (e) => {
 
 function fmt(n){ return Math.round(n).toLocaleString('ja-JP'); }
 function fmtUsd(n){ return '$' + n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }
-function fmtJpy(n){ return '¥' + Math.round(n).toLocaleString('ja-JP'); }
+// 選択通貨での整形（Intl が通貨記号・桁区切り・小数桁を通貨ごとに決める）
+function fmtFx(amount){
+  try { return new Intl.NumberFormat('ja-JP', { style:'currency', currency }).format(amount); }
+  catch (_) { return amount.toFixed(2) + ' ' + currency; }
+}
 function compact(n){
   if (n >= 1e9) return (n/1e9).toFixed(2)+'B';
   if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
   if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
   return String(Math.round(n));
 }
+// 為替換算の補助表示（表示OFF・レート未取得・USD選択なら空文字）
+function fxApprox(usd){ return (showFx && fxRate && currency !== 'USD') ? `≈ ${fmtFx(usd * fxRate)}` : ''; }
+
+// ---- 設定の入出力 --------------------------------------------------------
+function loadUiSettings(){
+  const get = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (_) { return d; } };
+
+  // 言語
+  document.documentElement.setAttribute('lang', lang);
+  buildLangOptions();
+
+  // テーマ（id を復元 → 選択肢生成 → 適用）
+  currentThemeId = get('theme', 'system');
+  if (currentThemeId !== 'system' && currentThemeId !== 'custom' && !THEME_PRESETS[currentThemeId]) currentThemeId = 'system';
+  buildThemeOptions();
+  fillCustomEditor();
+  renderTheme();
+
+  const range = get('defaultDayRange', '7');
+  document.getElementById('defRangeSel').value = range;
+  document.getElementById('dayRange').value = range;
+
+  showFx = get('showFx', '1') !== '0';
+  document.getElementById('showFx').checked = showFx;
+
+  compactMode = get('compactNums', '0') === '1';
+  document.getElementById('compactNums').checked = compactMode;
+
+  document.getElementById('startInPip').checked = get('startInPip', '0') === '1';
+  const ps = parseInt(get('pipSize', '320'), 10);
+  document.getElementById('pipSize').value = isFinite(ps) ? ps : 320;
+  const po = parseInt(get('pipOpacity', '30'), 10);
+  document.getElementById('pipOpacity').value = isFinite(po) ? po : 30;
+  document.documentElement.style.setProperty('--pip-bg-opacity', String((isFinite(po)?po:30)/100));
+}
+
+document.getElementById('langSel').addEventListener('change', (e) => setLang(e.target.value));
+
+document.getElementById('defRangeSel').addEventListener('change', (e) => {
+  try { localStorage.setItem('defaultDayRange', e.target.value); } catch (_) {}
+  document.getElementById('dayRange').value = e.target.value;
+  if (lastData) renderDailyChart(lastData.daily || []);
+});
+document.getElementById('showFx').addEventListener('change', (e) => {
+  showFx = e.target.checked;
+  try { localStorage.setItem('showFx', showFx ? '1' : '0'); } catch (_) {}
+  if (lastData) render(lastData);
+});
+document.getElementById('compactNums').addEventListener('change', (e) => {
+  compactMode = e.target.checked;
+  try { localStorage.setItem('compactNums', compactMode ? '1' : '0'); } catch (_) {}
+});
+document.getElementById('startInPip').addEventListener('change', (e) => {
+  try { localStorage.setItem('startInPip', e.target.checked ? '1' : '0'); } catch (_) {}
+});
+document.getElementById('pipSize').addEventListener('change', (e) => {
+  let v = parseInt(e.target.value, 10); if (!isFinite(v)) v = 320;
+  v = Math.min(520, Math.max(240, v)); e.target.value = v;
+  try { localStorage.setItem('pipSize', String(v)); } catch (_) {}
+  if (document.body.classList.contains('pip')) setPip(true); // 反映のため再適用
+});
+document.getElementById('pipOpacity').addEventListener('input', (e) => {
+  const v = parseInt(e.target.value, 10) || 0;
+  document.documentElement.style.setProperty('--pip-bg-opacity', String(v/100));
+  try { localStorage.setItem('pipOpacity', String(v)); } catch (_) {}
+});
+
+// ---- 監視パス / 再スキャン ----------------------------------------------
+document.getElementById('applyDirBtn').addEventListener('click', () => {
+  const path = document.getElementById('projectsDirInput').value.trim();
+  sendToNative(JSON.stringify({ type:'projectsDir', path }));
+});
+document.getElementById('rescanBtn').addEventListener('click', () => {
+  sendToNative(JSON.stringify({ type:'rescan' }));
+});
+
+// ---- モデル単価エディタ --------------------------------------------------
+function renderPriceEditor(pricing){
+  const list = (pricing && pricing.length) ? pricing : DEFAULT_PRICING;
+  document.getElementById('priceBody').innerHTML = list.map((p, i) => `
+    <tr data-key="${p.key}">
+      <td>${p.key}</td>
+      <td><input type="number" min="0" step="0.05" value="${p.in}" data-i="${i}" data-f="in" /></td>
+      <td><input type="number" min="0" step="0.05" value="${p.out}" data-i="${i}" data-f="out" /></td>
+    </tr>`).join('');
+}
+function collectPriceTable(){
+  const rows = document.querySelectorAll('#priceBody tr');
+  const table = [];
+  rows.forEach(tr => {
+    const key = tr.getAttribute('data-key');
+    const ins = tr.querySelector('input[data-f="in"]');
+    const outs = tr.querySelector('input[data-f="out"]');
+    const inP = parseFloat(ins.value), outP = parseFloat(outs.value);
+    table.push({ key, in: isFinite(inP) ? inP : 0, out: isFinite(outP) ? outP : 0 });
+  });
+  return table;
+}
+document.getElementById('applyPriceBtn').addEventListener('click', () => {
+  sendToNative(JSON.stringify({ type:'pricing', table: collectPriceTable() }));
+});
+document.getElementById('resetPriceBtn').addEventListener('click', () => {
+  renderPriceEditor(DEFAULT_PRICING);
+  sendToNative(JSON.stringify({ type:'pricing', table: DEFAULT_PRICING }));
+});
+
+// ---- 設定モーダルの開閉 --------------------------------------------------
+const overlay = document.getElementById('settingsOverlay');
+function openSettings(){
+  document.getElementById('projectsDirInput').value =
+    (lastData && lastData.projectsDir) ? lastData.projectsDir : '';
+  renderPriceEditor(lastData && lastData.pricing);
+  fillCustomEditor();
+  overlay.classList.add('open');
+}
+function closeSettings(){ overlay.classList.remove('open'); }
+document.getElementById('settingsBtn').addEventListener('click', openSettings);
+document.getElementById('settingsClose').addEventListener('click', closeSettings);
+overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSettings(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
 
 // ---- カウントアップ アニメーション --------------------------------------
-// 各メトリクスは「現在表示値(cur)」を「目標値(target)」へ向けてイージング。
-// 初回は 0 から、以降は前回値から実データへ滑らかに増減する。
 const tweens = {
   tokens: { cur: 0, target: 0, el: 'totalTokens', eps: 0.5, fmt },
   io:     { cur: 0, target: 0, el: 'ioTokens',     eps: 0.5, fmt },
@@ -287,6 +1065,7 @@ const tweens = {
   cost:   { cur: 0, target: 0, el: 'totalCostUsd', eps: 0.005, fmt: fmtUsd },
 };
 const EASE = 0.16; // 1フレームあたりの寄せ率（大きいほど速い）
+function fmtToken(n){ return compactMode ? compact(n) : fmt(n); }
 
 function animate(){
   for (const k in tweens){
@@ -295,10 +1074,23 @@ function animate(){
     if (Math.abs(diff) < tw.eps) tw.cur = tw.target;
     else tw.cur += diff * EASE;
     const el = document.getElementById(tw.el);
-    if (el) el.textContent = tw.fmt(tw.cur);
+    const show = (k === 'cost') ? fmtUsd : fmtToken;
+    if (el) el.textContent = show(tw.cur);
     if (k === 'cost'){
       const jpy = document.getElementById('totalCostJpy');
-      if (jpy) jpy.textContent = jpyRate ? `≈ ${fmtJpy(tw.cur * jpyRate)}` : '';
+      if (jpy) jpy.textContent = fxApprox(tw.cur);
+    }
+    if (k === 'tokens'){
+      const p = document.getElementById('pipTokens');
+      if (p) p.textContent = fmt(tw.cur);
+      const pm = document.getElementById('pipTokensM');
+      if (pm) pm.textContent = '≈ ' + compact(tw.cur);
+    }
+    if (k === 'cost'){
+      const pc = document.getElementById('pipCost');
+      if (pc) pc.textContent = fmtUsd(tw.cur);
+      const pj = document.getElementById('pipCostJpy');
+      if (pj) pj.textContent = fxApprox(tw.cur);
     }
   }
   requestAnimationFrame(animate);
@@ -312,48 +1104,85 @@ function bump(id){
 }
 
 // ---- チャート ------------------------------------------------------------
+function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function applyChartTheme(){
+  const muted = cssVar('--muted'), line = cssVar('--line'),
+        accent = cssVar('--accent'), accent2 = cssVar('--accent2'),
+        panel = cssVar('--panel'), pipbg = cssVar('--pip-bg');
+  if (modelChart){
+    modelChart.data.datasets[0].borderColor = panel;
+    modelChart.update('none');
+  }
+  if (projectChart){
+    projectChart.data.datasets[0].backgroundColor = accent2;
+    const s = projectChart.options.scales;
+    s.x.ticks.color = muted; s.x.grid.color = line; s.y.ticks.color = muted;
+    projectChart.update('none');
+  }
+  if (dailyChart){
+    dailyChart.data.datasets[0].backgroundColor = accent2;
+    dailyChart.data.datasets[1].borderColor = accent;
+    dailyChart.data.datasets[1].backgroundColor = accent;
+    const s = dailyChart.options.scales;
+    s.y.ticks.color = muted; s.y.grid.color = line;
+    s.y1.ticks.color = accent; s.x.ticks.color = muted;
+    dailyChart.options.plugins.legend.labels.color = muted;
+    dailyChart.update('none');
+  }
+  if (pipDonut){ pipDonut.data.datasets[0].borderColor = pipbg; pipDonut.update('none'); }
+  if (pipBars){ pipBars.data.datasets[0].backgroundColor = accent2; pipBars.update('none'); }
+}
+// チャートのデータセット名（凡例/ツールチップ）を言語へ追従。
+function applyChartI18n(){
+  if (dailyChart){
+    dailyChart.data.datasets[0].label = t('card.totalTokens');
+    dailyChart.data.datasets[1].label = t('card.estCost');
+    dailyChart.update('none');
+  }
+}
+
 let modelChart, projectChart, dailyChart;
 function initCharts(){
   modelChart = new Chart(document.getElementById('modelChart'), {
     type: 'doughnut',
-    data: { labels: [], datasets: [{ data: [], backgroundColor: COLORS, borderColor: '#1a2027', borderWidth: 2 }] },
+    data: { labels: [], datasets: [{ data: [], backgroundColor: COLORS, borderColor: cssVar('--panel') || '#1a2027', borderWidth: 2 }] },
     options: { animation:{duration:400}, plugins: { legend: { display:false } }, cutout: '60%' }
   });
   projectChart = new Chart(document.getElementById('projectChart'), {
     type: 'bar',
-    data: { labels: [], datasets: [{ data: [], backgroundColor: '#6ba8d9', borderRadius:4 }] },
+    data: { labels: [], datasets: [{ data: [], backgroundColor: cssVar('--accent2') || '#6ba8d9', borderRadius:4 }] },
     options: {
       animation:{duration:400},
       indexAxis: 'y',
       plugins: { legend: { display:false } },
       scales: {
-        x: { ticks: { color:'#8a94a3', callback:(v)=>compact(v) }, grid: { color:'#2c343d' } },
-        y: { ticks: { color:'#e6e9ee' }, grid: { display:false } }
+        x: { ticks: { color:cssVar('--muted'), callback:(v)=>compact(v) }, grid: { color:cssVar('--line') } },
+        y: { ticks: { color:cssVar('--muted') }, grid: { display:false } }
       }
     }
   });
   dailyChart = new Chart(document.getElementById('dailyChart'), {
     type: 'bar',
     data: { labels: [], datasets: [
-      { type:'bar', label:'トークン', data:[], backgroundColor:'#6ba8d9', borderRadius:4, yAxisID:'y', order:2 },
-      { type:'line', label:'コスト(USD)', data:[], borderColor:'#d97757', backgroundColor:'#d97757', yAxisID:'y1', tension:0.3, pointRadius:3, borderWidth:2, order:1 }
+      { type:'bar', label:t('card.totalTokens'), data:[], backgroundColor:cssVar('--accent2') || '#6ba8d9', borderRadius:4, yAxisID:'y', order:2 },
+      { type:'line', label:t('card.estCost'), data:[], borderColor:cssVar('--accent') || '#d97757', backgroundColor:cssVar('--accent') || '#d97757', yAxisID:'y1', tension:0.3, pointRadius:3, borderWidth:2, order:1 }
     ] },
     options: {
       animation:{duration:400},
       plugins: {
-        legend: { display:true, labels:{ color:'#8a94a3', boxWidth:12, usePointStyle:true } },
-        tooltip: { callbacks: { label:(c)=> c.datasetIndex===1 ? `コスト ${fmtUsd(c.parsed.y)}` : `トークン ${fmt(c.parsed.y)}` } }
+        legend: { display:true, labels:{ color:cssVar('--muted'), boxWidth:12, usePointStyle:true } },
+        tooltip: { callbacks: { label:(c)=> `${c.dataset.label} ${c.datasetIndex===1 ? fmtUsd(c.parsed.y) : fmt(c.parsed.y)}` } }
       },
       scales: {
-        y:  { position:'left',  beginAtZero:true, ticks:{ color:'#8a94a3', callback:(v)=>compact(v) }, grid:{ color:'#2c343d' } },
-        y1: { position:'right', beginAtZero:true, ticks:{ color:'#d97757', callback:(v)=>'$'+v.toFixed(2) }, grid:{ display:false } },
-        x:  { ticks:{ color:'#e6e9ee' }, grid:{ display:false } }
+        y:  { position:'left',  beginAtZero:true, ticks:{ color:cssVar('--muted'), callback:(v)=>compact(v) }, grid:{ color:cssVar('--line') } },
+        y1: { position:'right', beginAtZero:true, ticks:{ color:cssVar('--accent'), callback:(v)=>'$'+v.toFixed(2) }, grid:{ display:false } },
+        x:  { ticks:{ color:cssVar('--muted') }, grid:{ display:false } }
       }
     }
   });
 }
 
-// ---- 日別の時系列グラフ & 草(ヒートマップ) ------------------------------
+// ---- 日別の時系列グラフ & ヒートマップ ----------------------------------
 function renderDailyChart(days){
   const range = parseInt(document.getElementById('dayRange').value, 10) || 7;
   const series = days.slice(-range);
@@ -363,8 +1192,9 @@ function renderDailyChart(days){
   dailyChart.update();
   const sumTok = series.reduce((a,x)=>a + x.tokens, 0);
   const sumCost = series.reduce((a,x)=>a + x.cost, 0);
+  const jpy = fxApprox(sumCost);
   document.getElementById('dailySummary').textContent =
-    `直近${range}日 合計: ${fmt(sumTok)} トークン · ${fmtUsd(sumCost)}` + (jpyRate ? ` (≈ ${fmtJpy(sumCost * jpyRate)})` : '');
+    t('daily.summary', { range, tokens: fmt(sumTok), usd: fmtUsd(sumCost) }) + (jpy ? t('daily.summaryJpy', { fx: jpy }) : '');
 }
 
 const HM_COLORS = ['#161b22','#0e4429','#006d32','#26a641','#39d353'];
@@ -372,12 +1202,10 @@ function renderHeatmap(days){
   const host = document.getElementById('heatmap');
   if (!days || !days.length){ host.innerHTML = ''; return; }
   const cell = 11, gap = 3, step = cell + gap, topPad = 16, leftPad = 24;
-  // 非ゼロ日の四分位でレベル分け（GitHub風）
   const vals = days.map(d => d.tokens).filter(v => v > 0).sort((a,b)=>a-b);
   const q = (p) => vals.length ? vals[Math.floor((vals.length-1)*p)] : 0;
   const q1 = q(.25), q2 = q(.5), q3 = q(.75);
   const lvl = (v) => v<=0?0 : v<=q1?1 : v<=q2?2 : v<=q3?3 : 4;
-  // 週開始(日曜)に合わせて先頭へ空きセルを補う
   const first = new Date(days[0].date + 'T00:00:00');
   const offset = first.getDay(); // 0=日曜
   const cells = [];
@@ -391,10 +1219,10 @@ function renderHeatmap(days){
   const wd = ['','月','','水','','金',''];
   for (let r=0;r<7;r++){
     if (!wd[r]) continue;
-    const t = document.createElementNS(ns,'text');
-    t.setAttribute('x', 0); t.setAttribute('y', topPad + r*step + cell - 1);
-    t.setAttribute('class','hm-label'); t.textContent = wd[r];
-    svg.appendChild(t);
+    const tx = document.createElementNS(ns,'text');
+    tx.setAttribute('x', 0); tx.setAttribute('y', topPad + r*step + cell - 1);
+    tx.setAttribute('class','hm-label'); tx.textContent = wd[r];
+    svg.appendChild(tx);
   }
   let lastMonth = -1;
   for (let i=0;i<cells.length;i++){
@@ -403,17 +1231,17 @@ function renderHeatmap(days){
     const dt = new Date(d.date + 'T00:00:00'), m = dt.getMonth();
     if (day === 0 && m !== lastMonth){
       lastMonth = m;
-      const t = document.createElementNS(ns,'text');
-      t.setAttribute('x', leftPad + week*step); t.setAttribute('y', topPad - 5);
-      t.setAttribute('class','hm-label'); t.textContent = (m+1)+'月';
-      svg.appendChild(t);
+      const tx = document.createElementNS(ns,'text');
+      tx.setAttribute('x', leftPad + week*step); tx.setAttribute('y', topPad - 5);
+      tx.setAttribute('class','hm-label'); tx.textContent = (m+1)+'月';
+      svg.appendChild(tx);
     }
     const rect = document.createElementNS(ns,'rect');
     rect.setAttribute('x', leftPad + week*step); rect.setAttribute('y', topPad + day*step);
     rect.setAttribute('width', cell); rect.setAttribute('height', cell);
     rect.setAttribute('rx', 2); rect.setAttribute('fill', HM_COLORS[lvl(d.tokens)]);
     const title = document.createElementNS(ns,'title');
-    title.textContent = `${d.date}: ${fmt(d.tokens)} トークン · ${d.messages} メッセージ · ${fmtUsd(d.cost)}`;
+    title.textContent = t('hm.tooltip', { date: d.date, tokens: fmt(d.tokens), messages: d.messages, usd: fmtUsd(d.cost) });
     rect.appendChild(title);
     svg.appendChild(rect);
   }
@@ -422,7 +1250,7 @@ function renderHeatmap(days){
   const active = days.filter(d => d.tokens > 0).length;
   const totalTok = days.reduce((a,d)=>a + d.tokens, 0);
   document.getElementById('hmSummary').textContent =
-    `直近${days.length}日: ${active}日アクティブ · 合計 ${fmt(totalTok)} トークン`;
+    t('hm.summary', { days: days.length, active, tokens: fmt(totalTok) });
 }
 
 let lastDailySig = null;
@@ -430,38 +1258,118 @@ function dailySig(days){ let s = 0; for (const d of days) s += d.tokens; return 
 function renderTimeline(d){
   const days = d.daily || [];
   const sig = dailySig(days);
-  if (sig === lastDailySig) return; // 変化なしなら再描画しない（草のスクロール位置を保持）
+  if (sig === lastDailySig) return; // 変化なしなら再描画しない（ヒートマップのスクロール位置を保持）
   lastDailySig = sig;
   renderDailyChart(days);
   renderHeatmap(days);
 }
+
+// ---- PiP（正方形）モードの背景チャート ----------------------------------
+let pipDonut = null, pipBars = null;
+function renderPipGrass(days){
+  const host = document.getElementById('pipGrassCells');
+  if (!host) return;
+  if (!days || !days.length){ host.innerHTML = ''; return; }
+  const vals = days.map(d => d.tokens).filter(v => v > 0).sort((a,b)=>a-b);
+  const q = (p) => vals.length ? vals[Math.floor((vals.length-1)*p)] : 0;
+  const q1 = q(.25), q2 = q(.5), q3 = q(.75);
+  const lvl = (v) => v<=0?0 : v<=q1?1 : v<=q2?2 : v<=q3?3 : 4;
+  const last7 = days.slice(-7);
+  host.innerHTML = last7.map(d =>
+    `<i style="background:${HM_COLORS[lvl(d.tokens)]}" title="${d.date}: ${fmt(d.tokens)}"></i>`).join('');
+}
+
+function renderPipCharts(d){
+  if (!d) return;
+  renderPipGrass(d.daily || []);
+  const donutCv = document.getElementById('pipDonut');
+  const barsCv  = document.getElementById('pipBars');
+  if (!donutCv || !barsCv) return;
+
+  // 円グラフ: モデル別
+  const mLabels = d.models.map(m => m.name);
+  const mData   = d.models.map(m => m.tokens);
+  if (!pipDonut){
+    pipDonut = new Chart(donutCv, {
+      type:'doughnut',
+      data:{ labels:mLabels, datasets:[{ data:mData, backgroundColor:COLORS, borderColor:cssVar('--pip-bg'), borderWidth:2 }] },
+      options:{ animation:{duration:400}, responsive:true, maintainAspectRatio:false, cutout:'58%',
+        plugins:{ legend:{display:false}, tooltip:{enabled:false} } }
+    });
+  } else {
+    pipDonut.data.labels = mLabels;
+    pipDonut.data.datasets[0].data = mData;
+    pipDonut.update();
+  }
+
+  // 帯グラフ（横棒）: プロジェクト別 上位
+  const projTop = d.projects.slice(0, 6);
+  const pLabels = projTop.map(p => p.name);
+  const pData   = projTop.map(p => p.tokens);
+  if (!pipBars){
+    pipBars = new Chart(barsCv, {
+      type:'bar',
+      data:{ labels:pLabels, datasets:[{ data:pData, backgroundColor:cssVar('--accent2'), borderRadius:3 }] },
+      options:{ animation:{duration:400}, responsive:true, maintainAspectRatio:false, indexAxis:'y',
+        plugins:{ legend:{display:false}, tooltip:{enabled:false} },
+        scales:{ x:{display:false, beginAtZero:true}, y:{display:false} } }
+    });
+  } else {
+    pipBars.data.labels = pLabels;
+    pipBars.data.datasets[0].data = pData;
+    pipBars.update();
+  }
+}
+
+// ---- PiP（正方形）モードの切替 ------------------------------------------
+function pipSizeValue(){
+  let v = parseInt(document.getElementById('pipSize').value, 10);
+  if (!isFinite(v)) v = 320;
+  return Math.min(520, Math.max(240, v));
+}
+function setPip(on){
+  document.body.classList.toggle('pip', on);
+  sendToNative(JSON.stringify({ type:'pip', on: !!on, size: pipSizeValue() }));
+  if (on && lastData) requestAnimationFrame(() => renderPipCharts(lastData));
+  try { localStorage.setItem('pipMode', on ? '1' : '0'); } catch (_) {}
+}
+document.getElementById('pipBtn').addEventListener('click', () => setPip(!document.body.classList.contains('pip')));
+document.getElementById('pipExit').addEventListener('click', (e) => { e.stopPropagation(); setPip(false); });
+
+// フチなしPiPでもウィンドウを掴んで動かせるように、空き領域のドラッグをネイティブへ通知
+document.getElementById('pipView').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  if (e.target.closest('.pip-exit')) return; // 終了ボタンはドラッグ対象外
+  sendToNative(JSON.stringify({ type:'drag' }));
+});
 document.getElementById('dayRange').addEventListener('change', () => { if (lastData) renderDailyChart(lastData.daily || []); });
 
 // ---- 描画 ----------------------------------------------------------------
 function render(d){
   const prevTokens = lastData ? lastData.total.tokens : 0;
   lastData = d;
-  const t = d.total;
+  const tot = d.total;
 
   // カウントアップの目標値を更新（数字は animate() が滑らかに追従）
-  tweens.tokens.target = t.tokens;
-  tweens.io.target     = t.input + t.output;
-  tweens.cache.target  = t.cacheWrite5m + t.cacheWrite1h + t.cacheRead;
-  tweens.cost.target   = t.cost;
+  tweens.tokens.target = tot.tokens;
+  tweens.io.target     = tot.input + tot.output;
+  tweens.cache.target  = tot.cacheWrite5m + tot.cacheWrite1h + tot.cacheRead;
+  tweens.cost.target   = tot.cost;
 
   // 増加があれば軽くハイライト＆ステータスをパルス
-  if (t.tokens > prevTokens){
+  if (tot.tokens > prevTokens){
     bump('totalTokens'); bump('totalCostUsd');
     const dot = document.getElementById('statusDot');
     dot.classList.remove('pulse'); void dot.offsetWidth; dot.classList.add('pulse');
   }
 
   document.getElementById('totalBreakdown').textContent =
-    `${d.models.length} モデル · ${t.messages.toLocaleString('ja-JP')} メッセージ`;
-  document.getElementById('ioSub').textContent = `入力 ${compact(t.input)} / 出力 ${compact(t.output)}`;
-  const cw = t.cacheWrite5m + t.cacheWrite1h;
+    t('sub.modelsMessages', { models: d.models.length, messages: tot.messages.toLocaleString('ja-JP') });
+  document.getElementById('ioSub').textContent =
+    t('sub.io', { in: compact(tot.input), out: compact(tot.output) });
+  const cw = tot.cacheWrite5m + tot.cacheWrite1h;
   document.getElementById('cacheSub').textContent =
-    `書込 ${compact(cw)} (5m ${compact(t.cacheWrite5m)} / 1h ${compact(t.cacheWrite1h)}) · 読込 ${compact(t.cacheRead)}`;
+    t('sub.cache', { cw: compact(cw), cw5: compact(tot.cacheWrite5m), cw1: compact(tot.cacheWrite1h), cr: compact(tot.cacheRead) });
 
   // チャート
   modelChart.data.labels = d.models.map(m => m.name);
@@ -475,8 +1383,11 @@ function render(d){
   projectChart.data.datasets[0].data = projTop.map(p => p.tokens);
   projectChart.update();
 
-  // 時系列グラフ & 草
+  // 時系列グラフ & ヒートマップ
   renderTimeline(d);
+
+  // PiP表示中なら背景チャート（円/帯）も更新
+  if (document.body.classList.contains('pip')) renderPipCharts(d);
 
   // テーブル
   document.getElementById('modelTable').innerHTML = d.models.map(m => `
@@ -513,20 +1424,51 @@ function render(d){
 function updateStatus(lastActivity){
   const dot = document.getElementById('statusDot');
   const status = document.getElementById('status');
-  if (!lastActivity){ status.textContent = 'データ待機中'; dot.classList.add('stale'); return; }
+  const pipDot = document.getElementById('pipDot');
+  const pipStatus = document.getElementById('pipStatus');
+  const set = (txt, stale) => {
+    status.textContent = txt; dot.classList.toggle('stale', stale);
+    if (pipStatus) pipStatus.textContent = txt;
+    if (pipDot) pipDot.classList.toggle('stale', stale);
+  };
+  if (!lastActivity){ set(t('status.waitingData'), true); return; }
   const ago = Date.now() - new Date(lastActivity).getTime();
   const mins = Math.floor(ago / 60000);
-  dot.classList.toggle('stale', mins > 5);
-  if (mins < 1) status.textContent = '最終アクティビティ: たった今';
-  else if (mins < 60) status.textContent = `最終アクティビティ: ${mins}分前`;
-  else status.textContent = `最終アクティビティ: ${Math.floor(mins/60)}時間前`;
+  if (mins < 1) set(t('status.justNow'), false);
+  else if (mins < 60) set(t('status.minAgo', { n: mins }), mins > 5);
+  else set(t('status.hourAgo', { n: Math.floor(mins/60) }), true);
 }
 
+// 起動時の初期化
+loadUiSettings();      // 言語・テーマ・カスタム・各表示オプションを復元/適用
+translatePage();       // 静的要素を翻訳
 initCharts();
+applyChartTheme();     // 現在のテーマ変数をチャートへ反映
+applyChartI18n();      // データセット名を言語へ反映
 requestAnimationFrame(animate);
 
-// ネイティブへ初回スナップショットを要求
-sendToNative('ready');
+// 起動時に PiP で開始する設定なら、初回データ受信後に切り替える
+let pipAutoStarted = false;
+function maybeStartPip(){
+  if (pipAutoStarted) return;
+  pipAutoStarted = true;
+  if (document.getElementById('startInPip').checked) requestAnimationFrame(() => setPip(true));
+}
+
+// WebView2 (.NET) からのデータ受信（C# が N秒ごとに push）
+if (window.chrome && window.chrome.webview){
+  window.chrome.webview.addEventListener('message', (e) => {
+    const d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+    render(d);
+    maybeStartPip();
+  });
+  window.chrome.webview.postMessage('ready'); // 初回スナップショット要求
+} else {
+  // WebKit 系（mac/linux）は window.__recv 経由。初回データ後に PiP 自動開始を判定。
+  const baseRecv = window.__recv;
+  window.__recv = function(d){ baseRecv(d); maybeStartPip(); };
+  sendToNative('ready');
+}
 setInterval(() => { if (lastData) updateStatus(lastData.lastActivity); }, 30000);
 </script>
 </body>

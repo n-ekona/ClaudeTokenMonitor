@@ -16,8 +16,14 @@
 typedef struct {
     Stats *stats;
     WebKitWebView *web;
+    GtkWidget *win;
     guint timeout_id;
     gboolean initialized;
+
+    // PiP（正方形）モード。通常時のサイズ/位置/装飾を退避して復元する。
+    gboolean pip_on;
+    int prev_w, prev_h, prev_x, prev_y;
+    gboolean prev_decorated;
 } App;
 
 // 集計スナップショットをページへ配信。
@@ -44,9 +50,78 @@ static void schedule_timer(App *app) {
     app->timeout_id = g_timeout_add(stats_interval_ms(app->stats), tick_cb, app);
 }
 
+// ネイティブ枠の配色をテーマに合わせる（スクロールバーは WebView の color-scheme が追従）
+static void apply_theme(gboolean dark) {
+    GtkSettings *gs = gtk_settings_get_default();
+    if (gs) g_object_set(gs, "gtk-application-prefer-dark-theme", dark, NULL);
+}
+
+// PiP ウィンドウを、自分が乗っているモニタの作業領域の右下隅(24px マージン)へ移動。
+static void pip_move_to_corner(GtkWindow *win, int size) {
+    GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(win));
+    GdkMonitor *mon = NULL;
+    GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));
+    if (gw) mon = gdk_display_get_monitor_at_window(display, gw);
+    if (!mon) mon = gdk_display_get_primary_monitor(display);
+    if (!mon) mon = gdk_display_get_monitor(display, 0);
+    if (!mon) return;
+    GdkRectangle wa;
+    gdk_monitor_get_workarea(mon, &wa);
+    int x = wa.x + wa.width - size - 24;
+    int y = wa.y + wa.height - size - 24;
+    gtk_window_move(win, x, y);
+}
+
+// 正方形(PiP)モードの切替。on で装飾なし最前面の正方形へ、off で元へ戻す。
+static void set_pip(App *app, gboolean on, int size) {
+    if (size < 240) size = 240;
+    if (size > 520) size = 520;
+    GtkWindow *win = GTK_WINDOW(app->win);
+
+    if (on && !app->pip_on) {
+        // 通常表示の復元用に現在のサイズ/位置/装飾を退避
+        gtk_window_get_size(win, &app->prev_w, &app->prev_h);
+        gtk_window_get_position(win, &app->prev_x, &app->prev_y);
+        app->prev_decorated = gtk_window_get_decorated(win);
+
+        gtk_window_set_decorated(win, FALSE); // タイトルバー/枠を消す
+        gtk_window_set_keep_above(win, TRUE); // 常に最前面
+        gtk_window_resize(win, size, size);
+        pip_move_to_corner(win, size);
+        app->pip_on = TRUE;
+    } else if (on && app->pip_on) {
+        // 既に PiP 表示中にサイズだけ変わった場合は、その場でリサイズして配置し直す
+        gtk_window_resize(win, size, size);
+        pip_move_to_corner(win, size);
+    } else if (!on && app->pip_on) {
+        gtk_window_set_keep_above(win, FALSE);
+        gtk_window_set_decorated(win, app->prev_decorated);
+        gtk_window_resize(win, app->prev_w, app->prev_h);
+        gtk_window_move(win, app->prev_x, app->prev_y);
+        app->pip_on = FALSE;
+    }
+}
+
+// フチなし PiP でもウィンドウを掴んで動かせるよう、OS のウィンドウ移動ループを起動。
+static void pip_begin_drag(App *app) {
+    GtkWindow *win = GTK_WINDOW(app->win);
+    GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(win));
+    GdkSeat *seat = gdk_display_get_default_seat(display);
+    GdkDevice *pointer = seat ? gdk_seat_get_pointer(seat) : NULL;
+    int x = 0, y = 0;
+    if (pointer) gdk_device_get_position(pointer, NULL, &x, &y); // ルート座標
+    gtk_window_begin_move_drag(win, 1 /* 左ボタン */, x, y, GDK_CURRENT_TIME);
+}
+
 // ページ → ネイティブ:
-//   "ready"                      → 初回スナップショット送信
-//   {"type":"interval","ms":N}   → 更新間隔を変更
+//   "ready"                       → 初回スナップショット送信
+//   {"type":"interval","ms":N}    → 更新間隔を変更
+//   {"type":"projectsDir","path"} → 監視対象パスの変更＋再スキャン
+//   {"type":"rescan"}             → 集計を全クリアして再スキャン
+//   {"type":"pricing","table":[]} → モデル単価の上書き＋再計算
+//   {"type":"theme","mode":"dark"}→ ネイティブ枠の配色
+//   {"type":"pip","on":b,"size":N}→ 正方形(PiP)モードの切替
+//   {"type":"drag"}               → PiP ウィンドウのドラッグ開始
 static void on_message(WebKitUserContentManager *ucm, WebKitJavascriptResult *res, gpointer data) {
     (void)ucm;
     App *app = data;
@@ -59,11 +134,29 @@ static void on_message(WebKitUserContentManager *ucm, WebKitJavascriptResult *re
                 JsonNode *rn = json_parser_get_root(p);
                 if (rn && JSON_NODE_HOLDS_OBJECT(rn)) {
                     JsonObject *o = json_node_get_object(rn);
-                    if (g_strcmp0(json_object_get_string_member_with_default(o, "type", ""), "interval") == 0 &&
-                        json_object_has_member(o, "ms")) {
+                    const char *type = json_object_get_string_member_with_default(o, "type", "");
+                    if (g_strcmp0(type, "interval") == 0 && json_object_has_member(o, "ms")) {
                         int ms = (int)json_object_get_int_member(o, "ms");
                         stats_set_interval(app->stats, ms);
                         schedule_timer(app); // 新しい間隔で再スケジュール
+                    } else if (g_strcmp0(type, "projectsDir") == 0) {
+                        const char *path = json_object_get_string_member_with_default(o, "path", NULL);
+                        stats_set_projects_dir(app->stats, path);
+                    } else if (g_strcmp0(type, "rescan") == 0) {
+                        stats_rescan(app->stats);
+                    } else if (g_strcmp0(type, "pricing") == 0 && json_object_has_member(o, "table")) {
+                        JsonNode *tn = json_object_get_member(o, "table");
+                        if (JSON_NODE_HOLDS_ARRAY(tn))
+                            stats_set_pricing(app->stats, json_node_get_array(tn));
+                    } else if (g_strcmp0(type, "theme") == 0) {
+                        const char *mode = json_object_get_string_member_with_default(o, "mode", NULL);
+                        apply_theme(g_strcmp0(mode, "light") != 0); // 既定はダーク
+                    } else if (g_strcmp0(type, "pip") == 0 && json_object_has_member(o, "on")) {
+                        gboolean on = json_object_get_boolean_member_with_default(o, "on", FALSE);
+                        int size = (int)json_object_get_int_member_with_default(o, "size", 320);
+                        set_pip(app, on, size);
+                    } else if (g_strcmp0(type, "drag") == 0) {
+                        if (app->pip_on) pip_begin_drag(app);
                     }
                 }
             }
@@ -106,6 +199,26 @@ static char *locate_index_uri(void) {
     return uri;
 }
 
+// 実行ファイル隣の web/icon.png をウィンドウ/タスクバーのアイコンに設定（無ければ無視）
+static void set_window_icon(GtkWindow *win) {
+    char exe[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    char *path = NULL;
+    if (n > 0) {
+        exe[n] = '\0';
+        char *dir = g_path_get_dirname(exe);
+        path = g_build_filename(dir, "web", "icon.png", NULL);
+        g_free(dir);
+    }
+    if (!path || !g_file_test(path, G_FILE_TEST_EXISTS)) {
+        g_free(path);
+        path = g_build_filename(g_get_current_dir(), "web", "icon.png", NULL); // CWD フォールバック
+    }
+    if (g_file_test(path, G_FILE_TEST_EXISTS))
+        gtk_window_set_icon_from_file(win, path, NULL);
+    g_free(path);
+}
+
 int main(int argc, char **argv) {
     gtk_init(&argc, &argv);
 
@@ -126,7 +239,9 @@ int main(int argc, char **argv) {
     g_signal_connect(app->web, "load-changed", G_CALLBACK(on_load_changed), app);
 
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    app->win = win;
     gtk_window_set_title(GTK_WINDOW(win), "Claude Code トークン監視");
+    set_window_icon(GTK_WINDOW(win));
     gtk_window_set_default_size(GTK_WINDOW(win), 1240, 860);
     g_signal_connect(win, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     gtk_container_add(GTK_CONTAINER(win), GTK_WIDGET(app->web));

@@ -3,6 +3,7 @@
 #include "stats.h"
 
 #include <json-glib/json-glib.h>
+#include <glib/gstdio.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,8 +11,9 @@
 #include <sys/stat.h>
 
 // ---- 料金表 (per MTok: input, output) ------------------------------------
+// 既定14件（不変）。実効テーブルは config / UI で上書き可能（s->pricing）。
 typedef struct { const char *key; double in_p; double out_p; } Price;
-static const Price PRICING[] = {
+static const Price DEFAULT_PRICING[] = {
     {"claude-fable-5", 10, 50},
     {"claude-mythos-5", 10, 50},
     {"claude-opus-4-8", 5, 25},
@@ -27,6 +29,10 @@ static const Price PRICING[] = {
     {"claude-3-5-haiku", 0.8, 4},
     {"claude-3-haiku", 0.25, 1.25},
 };
+
+// 実効テーブルの1要素（key は所有・g_free 対象）
+typedef struct { char *key; double in_p; double out_p; } PriceEntry;
+
 #define CACHE_WRITE_5M_MULT 1.25
 #define CACHE_WRITE_1H_MULT 2.0
 #define CACHE_READ_MULT 0.1
@@ -38,8 +44,11 @@ typedef struct {
 
 struct _Stats {
     char *projects_dir;
+    char *default_projects_dir;  // 既定の監視ルート(空指定で戻す先)
     char *home_dir;          // displayPath の ~ 短縮基準(projects_dir 上書きと無関係に実 home)
+    char *config_path;       // config.json の絶対パス
     int interval_ms;
+    GArray *pricing;         // PriceEntry の動的配列（実効の料金表）
 
     Bucket total;
     GHashTable *by_model;    // char* -> Bucket*
@@ -58,16 +67,72 @@ static gint64 bucket_tokens(const Bucket *b) {
     return b->input + b->output + b->cw5 + b->cw1 + b->cread;
 }
 
-static void price_for(const char *model, double *in_p, double *out_p) {
-    for (gsize i = 0; i < G_N_ELEMENTS(PRICING); i++) {
-        if (g_strcmp0(model, PRICING[i].key) == 0 || g_str_has_prefix(model, PRICING[i].key)) {
-            *in_p = PRICING[i].in_p;
-            *out_p = PRICING[i].out_p;
+static void price_for(Stats *s, const char *model, double *in_p, double *out_p) {
+    for (guint i = 0; i < s->pricing->len; i++) {
+        const PriceEntry *e = &g_array_index(s->pricing, PriceEntry, i);
+        if (g_strcmp0(model, e->key) == 0 || g_str_has_prefix(model, e->key)) {
+            *in_p = e->in_p;
+            *out_p = e->out_p;
             return;
         }
     }
     *in_p = 5;  // フォールバック
     *out_p = 25;
+}
+
+// GArray<PriceEntry> の各要素 key を解放（g_array_set_clear_func 用）
+static void price_entry_clear(gpointer p) {
+    PriceEntry *e = p;
+    g_free(e->key);
+    e->key = NULL;
+}
+
+// 実効テーブルを既定14件で初期化する。
+static void pricing_set_defaults(Stats *s) {
+    g_array_set_size(s->pricing, 0); // clear_func が既存 key を解放
+    for (gsize i = 0; i < G_N_ELEMENTS(DEFAULT_PRICING); i++) {
+        PriceEntry e = { g_strdup(DEFAULT_PRICING[i].key), DEFAULT_PRICING[i].in_p, DEFAULT_PRICING[i].out_p };
+        g_array_append_val(s->pricing, e);
+    }
+}
+
+// JSON オブジェクトから数値メンバを double で取得（int でも double でも可）
+static double get_double(JsonObject *obj, const char *name) {
+    if (!json_object_has_member(obj, name)) return 0;
+    JsonNode *n = json_object_get_member(obj, name);
+    if (!JSON_NODE_HOLDS_VALUE(n)) return 0;
+    GType t = json_node_get_value_type(n);
+    if (t == G_TYPE_INT64) return (double)json_node_get_int(n);
+    if (t == G_TYPE_DOUBLE) return json_node_get_double(n);
+    return 0;
+}
+
+// JsonArray から実効テーブルを上書き構築。1件以上で TRUE。
+// 空/NULL/全無効なら s->pricing は変更せず FALSE を返す。
+static gboolean pricing_set_from_array(Stats *s, JsonArray *arr) {
+    if (!arr) return FALSE;
+    guint n = json_array_get_length(arr);
+    GArray *tmp = g_array_new(FALSE, FALSE, sizeof(PriceEntry));
+    for (guint i = 0; i < n; i++) {
+        JsonNode *node = json_array_get_element(arr, i);
+        if (!node || !JSON_NODE_HOLDS_OBJECT(node)) continue;
+        JsonObject *o = json_node_get_object(node);
+        const char *key = json_object_get_string_member_with_default(o, "key", NULL);
+        if (!key || !*key) continue;
+        PriceEntry e = { g_strdup(key), get_double(o, "in"), get_double(o, "out") };
+        g_array_append_val(tmp, e);
+    }
+    if (tmp->len == 0) { g_array_free(tmp, TRUE); return FALSE; }
+
+    // 既存を解放してから所有権ごと差し替え
+    g_array_set_size(s->pricing, 0); // clear_func が既存 key を解放
+    for (guint i = 0; i < tmp->len; i++) {
+        PriceEntry *e = &g_array_index(tmp, PriceEntry, i);
+        g_array_append_val(s->pricing, *e); // key の所有権を移譲
+    }
+    // tmp には clear_func 未設定。TRUE で配列バッファのみ解放（key は s->pricing へ移譲済み）。
+    g_array_free(tmp, TRUE);
+    return TRUE;
 }
 
 static char *iso_now(void) {
@@ -79,20 +144,108 @@ static char *iso_now(void) {
     return out;
 }
 
+// ---- 実効テーブルを JsonBuilder へ [{key,in,out}] で書き出す ----------------
+static void add_pricing_array(JsonBuilder *b, Stats *s) {
+    json_builder_begin_array(b);
+    for (guint i = 0; i < s->pricing->len; i++) {
+        const PriceEntry *e = &g_array_index(s->pricing, PriceEntry, i);
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "key"); json_builder_add_string_value(b, e->key);
+        json_builder_set_member_name(b, "in");  json_builder_add_double_value(b, e->in_p);
+        json_builder_set_member_name(b, "out"); json_builder_add_double_value(b, e->out_p);
+        json_builder_end_object(b);
+    }
+    json_builder_end_array(b);
+}
+
+// ---- 設定ファイル(config.json)の読み書き --------------------------------
+// 起動時に呼ぶ。存在すれば projectsDir / intervalMs / pricing を上書きする。
+static void load_config(Stats *s) {
+    if (!g_file_test(s->config_path, G_FILE_TEST_EXISTS)) return;
+    JsonParser *p = json_parser_new();
+    if (json_parser_load_from_file(p, s->config_path, NULL)) {
+        JsonNode *rn = json_parser_get_root(p);
+        if (rn && JSON_NODE_HOLDS_OBJECT(rn)) {
+            JsonObject *o = json_node_get_object(rn);
+            const char *pd = json_object_get_string_member_with_default(o, "projectsDir", NULL);
+            if (pd && *pd) {
+                g_free(s->projects_dir);
+                s->projects_dir = g_strdup(pd);
+            }
+            if (json_object_has_member(o, "intervalMs")) {
+                JsonNode *iv = json_object_get_member(o, "intervalMs");
+                if (JSON_NODE_HOLDS_VALUE(iv))
+                    s->interval_ms = CLAMP((int)json_node_get_int(iv), 500, 600000);
+            }
+            if (json_object_has_member(o, "pricing")) {
+                JsonNode *pr = json_object_get_member(o, "pricing");
+                if (JSON_NODE_HOLDS_ARRAY(pr))
+                    pricing_set_from_array(s, json_node_get_array(pr)); // 空なら既定のまま
+            }
+        }
+    }
+    g_object_unref(p);
+}
+
+// 変更操作のたびに保存。失敗は致命的ではないので無視する。
+static void save_config(Stats *s) {
+    char *dir = g_path_get_dirname(s->config_path);
+    g_mkdir_with_parents(dir, 0700);
+    g_free(dir);
+
+    JsonBuilder *b = json_builder_new();
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "projectsDir"); json_builder_add_string_value(b, s->projects_dir);
+    json_builder_set_member_name(b, "intervalMs");  json_builder_add_int_value(b, s->interval_ms);
+    json_builder_set_member_name(b, "pricing");     add_pricing_array(b, s);
+    json_builder_end_object(b);
+
+    JsonGenerator *gen = json_generator_new();
+    JsonNode *root = json_builder_get_root(b);
+    json_generator_set_root(gen, root);
+    json_generator_to_file(gen, s->config_path, NULL);
+    json_node_free(root);
+    g_object_unref(gen);
+    g_object_unref(b);
+}
+
+// 集計状態を全消去（パス変更・再スキャン・単価変更で使う）。
+static void clear_state(Stats *s) {
+    memset(&s->total, 0, sizeof(Bucket));
+    g_hash_table_remove_all(s->by_model);
+    g_hash_table_remove_all(s->by_project);
+    g_hash_table_remove_all(s->by_day);
+    g_hash_table_remove_all(s->by_project_canonical);
+    g_hash_table_remove_all(s->by_project_canonical_match);
+    g_hash_table_remove_all(s->seen_ids);
+    g_hash_table_remove_all(s->offsets);
+    g_free(s->last_activity);
+    s->last_activity = NULL;
+}
+
 Stats *stats_new(void) {
     Stats *s = g_new0(Stats, 1);
 
     s->home_dir = g_strdup(g_get_home_dir());
     const char *dir = g_getenv("CLAUDE_PROJECTS_DIR");
     if (dir && *dir) {
-        s->projects_dir = g_strdup(dir);
+        s->default_projects_dir = g_strdup(dir);
     } else {
-        s->projects_dir = g_build_filename(s->home_dir, ".claude", "projects", NULL);
+        s->default_projects_dir = g_build_filename(s->home_dir, ".claude", "projects", NULL);
     }
+    s->projects_dir = g_strdup(s->default_projects_dir);
 
     const char *ms = g_getenv("REFRESH_INTERVAL_MS");
     int v = ms ? atoi(ms) : 0;
     s->interval_ms = (ms && v > 0) ? CLAMP(v, 500, 600000) : 3000;
+
+    // config.json は ${XDG_CONFIG_HOME:-~/.config}/ClaudeTokenMonitor/ に置く
+    s->config_path = g_build_filename(g_get_user_config_dir(), "ClaudeTokenMonitor", "config.json", NULL);
+
+    // 実効の料金表（既定14件で初期化。config / UI で上書き可能）
+    s->pricing = g_array_new(FALSE, FALSE, sizeof(PriceEntry));
+    g_array_set_clear_func(s->pricing, price_entry_clear);
+    pricing_set_defaults(s);
 
     s->by_model = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     s->by_project = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
@@ -102,6 +255,8 @@ Stats *stats_new(void) {
     s->seen_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     s->offsets = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     s->started_at = iso_now();
+
+    load_config(s); // 設定ファイルがあれば projectsDir / intervalMs / pricing を上書き
     return s;
 }
 
@@ -114,8 +269,11 @@ void stats_free(Stats *s) {
     g_hash_table_destroy(s->by_project_canonical_match);
     g_hash_table_destroy(s->seen_ids);
     g_hash_table_destroy(s->offsets);
+    g_array_free(s->pricing, TRUE); // clear_func が各 key を解放
     g_free(s->projects_dir);
+    g_free(s->default_projects_dir);
     g_free(s->home_dir);
+    g_free(s->config_path);
     g_free(s->last_activity);
     g_free(s->started_at);
     g_free(s);
@@ -123,7 +281,41 @@ void stats_free(Stats *s) {
 
 const char *stats_projects_dir(Stats *s) { return s->projects_dir; }
 int stats_interval_ms(Stats *s) { return s->interval_ms; }
-void stats_set_interval(Stats *s, int ms) { s->interval_ms = CLAMP(ms, 500, 600000); }
+void stats_set_interval(Stats *s, int ms) {
+    s->interval_ms = CLAMP(ms, 500, 600000);
+    save_config(s);
+}
+
+// 監視対象パスを変更し、全クリアして再スキャン＋config 保存。空/NULL は既定へ。
+void stats_set_projects_dir(Stats *s, const char *path) {
+    char *trimmed = path ? g_strdup(path) : NULL;
+    if (trimmed) g_strstrip(trimmed);
+    g_free(s->projects_dir);
+    if (!trimmed || !*trimmed)
+        s->projects_dir = g_strdup(s->default_projects_dir);
+    else
+        s->projects_dir = g_strdup(trimmed);
+    g_free(trimmed);
+
+    clear_state(s);
+    stats_full_scan(s);
+    save_config(s);
+}
+
+// 集計を全クリアして再スキャン（リセット）。
+void stats_rescan(Stats *s) {
+    clear_state(s);
+    stats_full_scan(s);
+}
+
+// モデル単価を上書きし、コスト再計算のため全クリアして再スキャン＋config 保存。
+void stats_set_pricing(Stats *s, JsonArray *table) {
+    if (!pricing_set_from_array(s, table))
+        pricing_set_defaults(s); // 空/NULL/全無効なら既定14件へ
+    clear_state(s);
+    stats_full_scan(s);
+    save_config(s);
+}
 
 static Bucket *get_bucket(GHashTable *map, const char *key) {
     Bucket *b = g_hash_table_lookup(map, key);
@@ -287,7 +479,7 @@ static gboolean process_line(Stats *s, const char *line, const char *project) {
     }
 
     double in_p, out_p;
-    price_for(model, &in_p, &out_p);
+    price_for(s, model, &in_p, &out_p);
     double cost =
         (double)input / 1e6 * in_p +
         (double)output / 1e6 * out_p +
@@ -585,6 +777,7 @@ char *stats_snapshot_json(Stats *s) {
     json_builder_set_member_name(b, "startedAt");  json_builder_add_string_value(b, s->started_at);
     json_builder_set_member_name(b, "projectsDir"); json_builder_add_string_value(b, s->projects_dir);
     json_builder_set_member_name(b, "intervalMs"); json_builder_add_int_value(b, s->interval_ms);
+    json_builder_set_member_name(b, "pricing");    add_pricing_array(b, s); // UI のエディタ初期化用
     char *now = iso_now();
     json_builder_set_member_name(b, "now"); json_builder_add_string_value(b, now);
     g_free(now);

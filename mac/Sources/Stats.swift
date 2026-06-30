@@ -3,8 +3,8 @@ import Foundation
 // Claude Code のトランスクリプト(~/.claude/projects/**/*.jsonl)を集計する。
 // windows 版 Stats.cs (server.js からの移植) を Swift へ移植したもの。
 final class Stats {
-    // 料金表 (per MTok: input, output)
-    private static let pricing: [(key: String, inP: Double, outP: Double)] = [
+    // 既定の料金表 (per MTok: input, output)
+    private static let DEFAULT_PRICING: [(key: String, inP: Double, outP: Double)] = [
         ("claude-fable-5", 10, 50),
         ("claude-mythos-5", 10, 50),
         ("claude-opus-4-8", 5, 25),
@@ -20,6 +20,9 @@ final class Stats {
         ("claude-3-5-haiku", 0.8, 4),
         ("claude-3-haiku", 0.25, 1.25),
     ]
+
+    // 実効の料金表（config で上書き可能）。UI から再計算するため可変。
+    private var pricing: [(key: String, inP: Double, outP: Double)] = Stats.DEFAULT_PRICING
     private static let cacheWrite5mMult = 1.25
     private static let cacheWrite1hMult = 2.0
     private static let cacheReadMult = 0.1
@@ -30,8 +33,10 @@ final class Stats {
         var tokens: Int { input + output + cacheWrite5m + cacheWrite1h + cacheRead }
     }
 
-    let projectsDir: String
+    var projectsDir: String
+    private let defaultProjectsDir: String          // 既定の監視ルート(env or ~/.claude/projects)
     private let homeDir: String                    // displayPath の ~ 短縮基準(projectsDir 上書きと無関係に実 home)
+    private let configPath: String                  // ~/Library/Application Support/ClaudeTokenMonitor/config.json
     var onChanged: (() -> Void)?
 
     private let lock = NSLock()
@@ -60,15 +65,20 @@ final class Stats {
         let env = ProcessInfo.processInfo.environment
         homeDir = FileManager.default.homeDirectoryForCurrentUser.path
         if let dir = env["CLAUDE_PROJECTS_DIR"], !dir.isEmpty {
-            projectsDir = dir
+            defaultProjectsDir = dir
         } else {
-            projectsDir = (homeDir as NSString).appendingPathComponent(".claude/projects")
+            defaultProjectsDir = (homeDir as NSString).appendingPathComponent(".claude/projects")
         }
+        projectsDir = defaultProjectsDir
         if let ms = env["REFRESH_INTERVAL_MS"], let v = Int(ms) {
             intervalMs = min(max(v, 500), 600000)
         } else {
             intervalMs = 3000
         }
+
+        let appSupport = (homeDir as NSString)
+            .appendingPathComponent("Library/Application Support/ClaudeTokenMonitor")
+        configPath = (appSupport as NSString).appendingPathComponent("config.json")
 
         isoOut = ISO8601DateFormatter()
         isoOut.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -80,9 +90,57 @@ final class Stats {
         dayFmt.timeZone = TimeZone.current
 
         startedAt = isoOut.string(from: Date())
+
+        // 設定ファイルがあれば projectsDir / intervalMs / pricing を上書き
+        loadConfig()
     }
 
-    private static func priceFor(_ model: String) -> (Double, Double) {
+    // ---- 設定ファイル(config.json)の読み書き --------------------------------
+    private func loadConfig() {
+        guard let data = FileManager.default.contents(atPath: configPath),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return } // 無い/壊れた設定は無視して既定で動く
+        if let pd = obj["projectsDir"] as? String,
+           !pd.trimmingCharacters(in: .whitespaces).isEmpty {
+            projectsDir = pd
+        }
+        if let iv = (obj["intervalMs"] as? NSNumber)?.intValue {
+            intervalMs = min(max(iv, 500), 600000)
+        }
+        if let pr = obj["pricing"] as? [Any] {
+            let list = Stats.parsePricing(pr)
+            if !list.isEmpty { pricing = list }
+        }
+    }
+
+    private func saveConfig() {
+        // projectsDir / pricing は lock 内で読み一貫させる(intervalMs は実質アトミック)。
+        lock.lock()
+        let pd = projectsDir
+        let iv = intervalMs
+        let pr = pricing.map { ["key": $0.key, "in": $0.inP, "out": $0.outP] as [String: Any] }
+        lock.unlock()
+        let obj: [String: Any] = ["projectsDir": pd, "intervalMs": iv, "pricing": pr]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted])
+        else { return }
+        let dir = (configPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? data.write(to: URL(fileURLWithPath: configPath), options: .atomic) // 保存失敗は致命的ではない
+    }
+
+    // UI/設定から受け取った配列を (key,in,out) のタプル列へ。
+    private static func parsePricing(_ arr: [Any]) -> [(key: String, inP: Double, outP: Double)] {
+        var list: [(key: String, inP: Double, outP: Double)] = []
+        for case let e as [String: Any] in arr {
+            guard let key = e["key"] as? String, !key.isEmpty else { continue }
+            let inP = (e["in"] as? NSNumber)?.doubleValue ?? 0
+            let outP = (e["out"] as? NSNumber)?.doubleValue ?? 0
+            list.append((key, inP, outP))
+        }
+        return list
+    }
+
+    private func priceFor(_ model: String) -> (Double, Double) {
         for p in pricing where model == p.key || model.hasPrefix(p.key) {
             return (p.inP, p.outP)
         }
@@ -99,7 +157,7 @@ final class Stats {
         t.resume()
     }
 
-    // 更新間隔をミリ秒で変更（UI/環境変数から）
+    // 更新間隔をミリ秒で変更（UI/環境変数から）。設定ファイルへも保存。
     func setInterval(_ ms: Int) {
         let clamped = min(max(ms, 500), 600000)
         timerQueue.async { [weak self] in
@@ -107,7 +165,58 @@ final class Stats {
             self.intervalMs = clamped
             self.timer?.schedule(deadline: .now() + .milliseconds(clamped),
                                  repeating: .milliseconds(clamped))
+            self.saveConfig()
         }
+    }
+
+    // 集計状態を全消去（パス変更・再スキャン・単価変更で使う）。呼び出しは lock 内。
+    private func clearState() {
+        total = Bucket()
+        byModel.removeAll()
+        byProject.removeAll()
+        byDay.removeAll()
+        byProjectCanonical.removeAll()
+        byProjectCanonicalMatch.removeAll()
+        seenIds.removeAll()
+        offsets.removeAll()
+        lastActivity = nil
+    }
+
+    // 監視対象パスを変更し、全クリアして再スキャン。空文字なら既定へ戻す。
+    func setProjectsDir(_ path: String?) {
+        lock.lock()
+        let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        projectsDir = trimmed.isEmpty ? defaultProjectsDir : trimmed
+        clearState()
+        for f in enumerateJsonl() { _ = ingestFile(f) }
+        lock.unlock()
+        saveConfig()
+        onChanged?()
+    }
+
+    // 集計を全クリアして再スキャン（リセット）。
+    func rescan() {
+        lock.lock()
+        clearState()
+        for f in enumerateJsonl() { _ = ingestFile(f) }
+        lock.unlock()
+        onChanged?()
+    }
+
+    // モデル単価を上書きし、コスト再計算のため全クリアして再スキャン。設定ファイルへ保存。
+    func setPricing(_ list: [(key: String, inP: Double, outP: Double)]) {
+        lock.lock()
+        pricing = list.isEmpty ? Stats.DEFAULT_PRICING : list
+        clearState()
+        for f in enumerateJsonl() { _ = ingestFile(f) }
+        lock.unlock()
+        saveConfig()
+        onChanged?()
+    }
+
+    // UI から受け取った JSON 配列([{key,in,out}])でモデル単価を更新。
+    func setPricingFromJson(_ arr: [Any]) {
+        setPricing(Stats.parsePricing(arr))
     }
 
     // タイマーを停止（ウィンドウ終了時に呼ぶ）。
@@ -274,7 +383,7 @@ final class Stats {
             w5 = cacheCreateTotal
         }
 
-        let (inP, outP) = Stats.priceFor(model)
+        let (inP, outP) = priceFor(model)
         let cost =
             Double(input) / 1e6 * inP +
             Double(output) / 1e6 * outP +
@@ -344,6 +453,7 @@ final class Stats {
             "startedAt": startedAt,
             "projectsDir": projectsDir,
             "intervalMs": intervalMs,
+            "pricing": pricing.map { ["key": $0.key, "in": $0.inP, "out": $0.outP] as [String: Any] },
             "now": isoOut.string(from: Date()),
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: snap, options: []),
