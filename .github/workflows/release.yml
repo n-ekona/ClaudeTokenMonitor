@@ -96,19 +96,22 @@ jobs:
       - name: Verify architectures
         run: lipo -archs mac/dist/ClaudeTokenMonitor.app/Contents/MacOS/ClaudeTokenMonitor
 
-      - name: Package zip
+      - name: Package dmg
         run: |
           v="${{ needs.version.outputs.version }}"
-          ditto -c -k --sequesterRsrc --keepParent \
-            mac/dist/ClaudeTokenMonitor.app \
-            "ClaudeTokenMonitor-$v-mac-universal.zip"
-          ls -la ClaudeTokenMonitor-*-mac-universal.zip
+          staging="dmg-staging"
+          mkdir -p "$staging"
+          cp -R mac/dist/ClaudeTokenMonitor.app "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Claude Code トークン監視" -srcfolder "$staging" \
+            -ov -format UDZO "ClaudeTokenMonitor-$v-mac-universal.dmg"
+          ls -la ClaudeTokenMonitor-*-mac-universal.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dist-macos
-          path: ClaudeTokenMonitor-*-mac-universal.zip
+          path: ClaudeTokenMonitor-*-mac-universal.dmg
 
   # ---- Linux (C + GTK3 + WebKitGTK) — distro ごとに per-distro binary zip ----
   linux:
@@ -185,7 +188,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*.zip
+          files: |
+            dist/**/*.zip
+            dist/**/*.dmg
           generate_release_notes: true
           body: |
             ## Claude Code トークン監視 ${{ github.ref_name }}
@@ -222,9 +227,9 @@ jobs:
 
             | ファイル | 説明 |
             |---|---|
-            | `ClaudeTokenMonitor-*-mac-universal.zip` | **ユニバーサルバイナリ**（Intel / Apple Silicon 両対応）。展開して `ClaudeTokenMonitor.app` を実行。 |
+            | `ClaudeTokenMonitor-*-mac-universal.dmg` | **ユニバーサルバイナリ**（Intel / Apple Silicon 両対応）。開いて `ClaudeTokenMonitor.app` を Applications へドラッグ。 |
 
-            > 追加ランタイムは不要です（WKWebView は macOS 標準・macOS 11 以降）。
+            > 追加ランタイムは不要です（WKWebView は macOS 標準・macOS 11 以降）。署名なしビルドのため、初回起動時は `.app` を右クリック→「開く」で Gatekeeper を通してください。
 
             ### Linux（C + GTK3 + WebKitGTK）
 
