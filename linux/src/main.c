@@ -118,6 +118,60 @@ static void pip_begin_drag(App *app) {
     gtk_window_begin_move_drag(win, 1 /* 左ボタン */, x, y, GDK_CURRENT_TIME);
 }
 
+// カスタムテーマを JSON で保存（既定フォルダは ~/Documents）。
+static void export_theme(App *app, const char *json, const char *filename) {
+    GtkWidget *d = gtk_file_chooser_dialog_new(
+        "保存", GTK_WINDOW(app->win), GTK_FILE_CHOOSER_ACTION_SAVE,
+        "キャンセル", GTK_RESPONSE_CANCEL, "保存", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooser *ch = GTK_FILE_CHOOSER(d);
+    const char *docs = g_get_user_special_dir(G_USER_DIRECTORY_DOCUMENTS);
+    if (docs) gtk_file_chooser_set_current_folder(ch, docs);
+    gtk_file_chooser_set_current_name(ch, (filename && *filename) ? filename : "theme.json");
+    gtk_file_chooser_set_do_overwrite_confirmation(ch, TRUE);
+    if (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_ACCEPT) {
+        char *fn = gtk_file_chooser_get_filename(ch);
+        if (fn) { g_file_set_contents(fn, json ? json : "", -1, NULL); g_free(fn); }
+    }
+    gtk_widget_destroy(d);
+}
+
+// JSON を読み込み、object なら web へ返す（既定フォルダは ~/Documents）。
+static void import_theme(App *app) {
+    GtkWidget *d = gtk_file_chooser_dialog_new(
+        "読み込み", GTK_WINDOW(app->win), GTK_FILE_CHOOSER_ACTION_OPEN,
+        "キャンセル", GTK_RESPONSE_CANCEL, "開く", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooser *ch = GTK_FILE_CHOOSER(d);
+    const char *docs = g_get_user_special_dir(G_USER_DIRECTORY_DOCUMENTS);
+    if (docs) gtk_file_chooser_set_current_folder(ch, docs);
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "JSON (*.json)");
+    gtk_file_filter_add_pattern(filter, "*.json");
+    gtk_file_chooser_add_filter(ch, filter);
+    if (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_ACCEPT) {
+        char *fn = gtk_file_chooser_get_filename(ch);
+        char *contents = NULL;
+        if (fn && g_file_get_contents(fn, &contents, NULL, NULL)) {
+            JsonParser *p = json_parser_new();
+            if (json_parser_load_from_data(p, contents, -1, NULL)) {
+                JsonNode *rn = json_parser_get_root(p);
+                if (rn && JSON_NODE_HOLDS_OBJECT(rn)) {
+                    JsonGenerator *gen = json_generator_new();
+                    json_generator_set_root(gen, rn);
+                    char *reser = json_generator_to_data(gen, NULL);
+                    char *script = g_strdup_printf(
+                        "window.__recv({\"type\":\"importedTheme\",\"theme\":%s})", reser);
+                    webkit_web_view_run_javascript(app->web, script, NULL, NULL, NULL);
+                    g_free(script); g_free(reser); g_object_unref(gen);
+                }
+            }
+            g_object_unref(p);
+        }
+        g_free(contents);
+        g_free(fn);
+    }
+    gtk_widget_destroy(d);
+}
+
 // ページ → ネイティブ:
 //   "ready"                       → 初回スナップショット送信
 //   {"type":"interval","ms":N}    → 更新間隔を変更
@@ -157,6 +211,12 @@ static void on_message(WebKitUserContentManager *ucm, WebKitJavascriptResult *re
                         JsonNode *sn = json_object_get_member(o, "settings");
                         if (JSON_NODE_HOLDS_OBJECT(sn))
                             stats_set_ui(app->stats, sn);
+                    } else if (g_strcmp0(type, "exportTheme") == 0) {
+                        const char *json = json_object_get_string_member_with_default(o, "json", NULL);
+                        const char *filename = json_object_get_string_member_with_default(o, "filename", "theme.json");
+                        if (json) export_theme(app, json, filename);
+                    } else if (g_strcmp0(type, "importTheme") == 0) {
+                        import_theme(app);
                     } else if (g_strcmp0(type, "theme") == 0) {
                         const char *mode = json_object_get_string_member_with_default(o, "mode", NULL);
                         apply_theme(g_strcmp0(mode, "light") != 0); // 既定はダーク
