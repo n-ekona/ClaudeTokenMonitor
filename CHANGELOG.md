@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-07-01
+
 アプリ内のアイコンを絵文字から線画の SVG に置き換え、ウィンドウ/タスクバーのアイコンもブランドマークで作り直した。カスタムテーマを JSON ファイルとして保存し、読み込んで復元できるようにした。
 
 ### 追加
@@ -13,6 +15,7 @@
 ### 変更
 
 - アプリ内のアイコン（設定・PiP・閉じる・PiP終了）を絵文字から線画の SVG に変更し、文字色とテーマに追従させた。ウィンドウ/タスクバーのアイコンもブランドマーク（棒グラフ）で作り直した。
+- macOS 版の配布形式を zip から dmg に変更した。開いて `ClaudeTokenMonitor.app` を Applications へドラッグするだけでインストールできる。
 
 ## [2.0.0] — 2026-07-01
 
@@ -78,7 +81,8 @@ Windows ネイティブ版（.NET 9 + WebView2）の初回リリース。`~/.cla
 
 - Windows ネイティブアプリ本体と、GitHub Actions によるリリース/ビルドのワークフロー。
 
-[Unreleased]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.1.0...v1.2.0

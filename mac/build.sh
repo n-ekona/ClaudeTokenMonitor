@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 APP_NAME="ClaudeTokenMonitor"
 DISP_NAME="Claude Code トークン監視"
 BUNDLE_ID="jp.nekona.claudetokenmonitor"
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
