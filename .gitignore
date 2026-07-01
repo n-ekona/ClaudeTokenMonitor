@@ -17,6 +17,9 @@ mac/dist/
 # ---- linux (C) build output ----
 linux/tokenmonitor
 
+# ---- Node (dev tooling: scripts/) ----
+node_modules/
+
 # ---- OS / editor ----
 Thumbs.db
 .DS_Store
@@ -26,4 +29,5 @@ Thumbs.db
 # ---- Claude 作業用ドキュメント（ローカル専用・非公開） ----
 HANDOFF.md
 CLAUDE.md
+OVERVIEW.md
 docs/superpowers/

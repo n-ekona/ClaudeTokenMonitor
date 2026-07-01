@@ -12,6 +12,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     var onPip: ((Bool, Double, Int) -> Void)?
     var onDrag: (() -> Void)?
     var onTheme: ((Bool) -> Void)?
+    var onExportTheme: ((String, String) -> Void)?
+    var onImportTheme: (() -> Void)?
 
     init(stats: Stats) {
         self.stats = stats
@@ -43,6 +45,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                 if let table = obj["table"] as? [Any] { stats.setPricingFromJson(table) }
             case "ui":
                 if let settings = obj["settings"] as? [String: Any] { stats.setUi(settings) }
+            case "exportTheme":
+                let json = obj["json"] as? String ?? ""
+                let filename = obj["filename"] as? String ?? "theme.json"
+                let cb = onExportTheme
+                DispatchQueue.main.async { cb?(json, filename) }
+            case "importTheme":
+                let cb = onImportTheme
+                DispatchQueue.main.async { cb?() }
             case "theme":
                 let dark = (obj["mode"] as? String) != "light" // 既定はダーク
                 let cb = onTheme
@@ -157,6 +167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         bridge.onTheme = { [weak self] dark in self?.applyTheme(dark) }
         bridge.onPip = { [weak self] on, size, opacity in self?.setPip(on, size, opacity) }
         bridge.onDrag = { [weak self] in self?.pipDrag() }
+        bridge.onExportTheme = { [weak self] json, name in self?.exportTheme(json, name) }
+        bridge.onImportTheme = { [weak self] in self?.importTheme() }
 
         // web フォルダの index.html を読み込む（バンドル Resources、無ければ実行ファイル隣）
         if let webDir = Self.locateWebDir() {
@@ -231,6 +243,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let ev = NSApp.currentEvent,
            ev.type == .leftMouseDown || ev.type == .leftMouseDragged {
             window.performDrag(with: ev)
+        }
+    }
+
+    // ~/Documents（取得できなければ home/Documents）。
+    private func documentsDir() -> URL {
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
+    }
+
+    // カスタムテーマを JSON で保存（既定 ~/Documents）。
+    private func exportTheme(_ json: String, _ filename: String) {
+        let panel = NSSavePanel()
+        panel.directoryURL = documentsDir()
+        panel.nameFieldStringValue = filename.isEmpty ? "theme.json" : filename
+        panel.allowedFileTypes = ["json"]
+        panel.beginSheetModal(for: window) { resp in
+            if resp == .OK, let url = panel.url {
+                try? json.data(using: .utf8)?.write(to: url)
+            }
+        }
+    }
+
+    // JSON を読み込み、object なら web へ返す（既定 ~/Documents）。
+    private func importTheme() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = documentsDir()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedFileTypes = ["json"]
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard resp == .OK, let url = panel.url,
+                  let data = try? Data(contentsOf: url),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let reser = try? JSONSerialization.data(withJSONObject: obj),
+                  let text = String(data: reser, encoding: .utf8) else { return }
+            // U+2028/U+2029（JSON では有効だが ES2019 以前の JS では行終端）を逃がす
+            let safe = text
+                .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+                .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+            self?.webView.evaluateJavaScript(
+                "window.__recv({\"type\":\"importedTheme\",\"theme\":\(safe)})", completionHandler: nil)
         }
     }
 

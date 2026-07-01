@@ -2,7 +2,22 @@
 
 このプロジェクトの変更点を記録する。書式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に従い、バージョンは [セマンティック バージョニング](https://semver.org/lang/ja/) に従う。
 
-## [2.0.0] — 現在開発中
+## [Unreleased]
+
+## [2.1.0] — 2026-07-01
+
+アプリ内のアイコンを絵文字から線画の SVG に置き換え、ウィンドウ/タスクバーのアイコンもブランドマークで作り直した。カスタムテーマを JSON ファイルとして保存し、読み込んで復元できるようにした。
+
+### 追加
+
+- カスタムテーマの JSON 保存/読み込み。設定のカスタムタブから現在の配色を JSON で書き出し、また読み込んで復元できる。保存/開くダイアログの既定パスは `~/Documents`。
+
+### 変更
+
+- アプリ内のアイコン（設定・PiP・閉じる・PiP終了）を絵文字から線画の SVG に変更し、文字色とテーマに追従させた。ウィンドウ/タスクバーのアイコンもブランドマーク（棒グラフ）で作り直した。
+- macOS 版の配布形式を zip から dmg に変更した。開いて `ClaudeTokenMonitor.app` を Applications へドラッグするだけでインストールできる。
+
+## [2.0.0] — 2026-07-01
 
 設定をヘッダーから独立した設定パネルへ集約し、監視対象パスやモデル単価など、これまで固定だった項目を画面から変更できるようにした。表示テーマ（ダーク/ライト/システム追従）と表示通貨を切り替えられるようにし、ウィンドウのタイトルバーやスクロールバー、グラフの配色までテーマに追従させた。ダッシュボードを11言語に対応させ、Windows のみだった PiP（正方形）モードを macOS・Linux へ広げた。設定は各 OS の設定ファイルへ保存し、ブラウザの保存領域を消しても復元できる。
 
@@ -66,7 +81,9 @@ Windows ネイティブ版（.NET 9 + WebView2）の初回リリース。`~/.cla
 
 - Windows ネイティブアプリ本体と、GitHub Actions によるリリース/ビルドのワークフロー。
 
-[2.0.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/n-ekona/ClaudeTokenMonitor/compare/v1.0.0...v1.1.0
