@@ -1,0 +1,10 @@
+{
+  "name": "claude-token-monitor-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only tooling (icon generation). Not part of the app runtime.",
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "png2icons": "^2.0.1"
+  }
+}
