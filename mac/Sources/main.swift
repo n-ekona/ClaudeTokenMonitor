@@ -279,8 +279,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let reser = try? JSONSerialization.data(withJSONObject: obj),
                   let text = String(data: reser, encoding: .utf8) else { return }
+            // U+2028/U+2029（JSON では有効だが ES2019 以前の JS では行終端）を逃がす
+            let safe = text
+                .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+                .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
             self?.webView.evaluateJavaScript(
-                "window.__recv({\"type\":\"importedTheme\",\"theme\":\(text)})", completionHandler: nil)
+                "window.__recv({\"type\":\"importedTheme\",\"theme\":\(safe)})", completionHandler: nil)
         }
     }
 

@@ -118,6 +118,21 @@ static void pip_begin_drag(App *app) {
     gtk_window_begin_move_drag(win, 1 /* 左ボタン */, x, y, GDK_CURRENT_TIME);
 }
 
+// JSON を window.__recv(...) へ splice する前に、U+2028/U+2029（JSON では有効だが
+// ES2019 以前の JS では行終端）を  /  へ逃がす。新規確保で返す。
+static char *escape_js_line_seps(const char *s) {
+    GString *out = g_string_new(NULL);
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (p[0] == 0xE2 && p[1] == 0x80 && (p[2] == 0xA8 || p[2] == 0xA9)) {
+            g_string_append(out, p[2] == 0xA8 ? "\\u2028" : "\\u2029");
+            p += 2;
+        } else {
+            g_string_append_c(out, (char)*p);
+        }
+    }
+    return g_string_free(out, FALSE);
+}
+
 // カスタムテーマを JSON で保存（既定フォルダは ~/Documents）。
 static void export_theme(App *app, const char *json, const char *filename) {
     GtkWidget *d = gtk_file_chooser_dialog_new(
@@ -158,10 +173,11 @@ static void import_theme(App *app) {
                     JsonGenerator *gen = json_generator_new();
                     json_generator_set_root(gen, rn);
                     char *reser = json_generator_to_data(gen, NULL);
+                    char *safe = escape_js_line_seps(reser); // 旧 JS エンジンでの行終端誤認を防ぐ
                     char *script = g_strdup_printf(
-                        "window.__recv({\"type\":\"importedTheme\",\"theme\":%s})", reser);
+                        "window.__recv({\"type\":\"importedTheme\",\"theme\":%s})", safe);
                     webkit_web_view_run_javascript(app->web, script, NULL, NULL, NULL);
-                    g_free(script); g_free(reser); g_object_unref(gen);
+                    g_free(script); g_free(safe); g_free(reser); g_object_unref(gen);
                 }
             }
             g_object_unref(p);
