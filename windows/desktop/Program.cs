@@ -274,6 +274,48 @@ internal static class Program
                         {
                             stats.SetUi(st);
                         }
+                        else if (type == "exportTheme")
+                        {
+                            // カスタムテーマを JSON で保存。既定フォルダは ~/Documents。
+                            var json = root.TryGetProperty("json", out var je) ? je.GetString() : null;
+                            var fname = root.TryGetProperty("filename", out var fe) ? fe.GetString() : null;
+                            if (!string.IsNullOrEmpty(json))
+                            {
+                                var dlg = new Microsoft.Win32.SaveFileDialog
+                                {
+                                    FileName = string.IsNullOrEmpty(fname) ? "theme.json" : fname,
+                                    DefaultExt = ".json",
+                                    Filter = "JSON (*.json)|*.json",
+                                    InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                                };
+                                try { if (dlg.ShowDialog(win) == true) File.WriteAllText(dlg.FileName, json); }
+                                catch { /* 保存失敗は無視 */ }
+                            }
+                        }
+                        else if (type == "importTheme")
+                        {
+                            // JSON を読み込んでテーマとして web へ返す。既定フォルダは ~/Documents。
+                            var dlg = new Microsoft.Win32.OpenFileDialog
+                            {
+                                DefaultExt = ".json",
+                                Filter = "JSON (*.json)|*.json",
+                                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                            };
+                            try
+                            {
+                                if (dlg.ShowDialog(win) == true)
+                                {
+                                    var text = File.ReadAllText(dlg.FileName);
+                                    using var td = System.Text.Json.JsonDocument.Parse(text);
+                                    if (td.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                                    {
+                                        var wrapped = "{\"type\":\"importedTheme\",\"theme\":" + td.RootElement.GetRawText() + "}";
+                                        web.CoreWebView2?.PostWebMessageAsJson(wrapped);
+                                    }
+                                }
+                            }
+                            catch { /* 不正/キャンセルは無視 */ }
+                        }
                         else if (type == "drag" && pipOn)
                         {
                             // フチなしPiPでもウィンドウを掴んで移動できるようにする。
