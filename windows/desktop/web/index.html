@@ -398,6 +398,8 @@
             </div>
             <div class="set-actions">
               <button id="copyThemeBtn" class="btn ghost" data-i18n="set.custom.copy">現在の配色をコピー</button>
+              <button id="exportThemeBtn" class="btn ghost" data-i18n="set.custom.export">JSONで保存</button>
+              <button id="importThemeBtn" class="btn ghost" data-i18n="set.custom.import">JSONを読み込み</button>
             </div>
           </div>
         </section>
@@ -614,7 +616,11 @@ function sendToNative(msg){
   } catch (_) { /* ブリッジ未接続(ブラウザ単体表示など)は無視 */ }
 }
 window.__recv = function(d){
-  try { render(typeof d === 'string' ? JSON.parse(d) : d); } catch (_) {}
+  try {
+    const o = (typeof d === 'string') ? JSON.parse(d) : d;
+    if (handleInbound(o)) return;   // 制御メッセージ（テーマ読込など）
+    render(o);
+  } catch (_) {}
 };
 
 // ---- UI 設定のネイティブ永続化（config.json の ui ブロックへミラー）-----------
@@ -882,6 +888,38 @@ document.getElementById('copyThemeBtn').addEventListener('click', () => {
   fillCustomEditor();
   selectTheme('custom');
 });
+
+// ---- カスタムテーマの JSON 保存 / 読み込み（ネイティブのファイルダイアログ）----
+// 既定パスは ~/Documents（各 OS のネイティブ側で指定）。web は要求を送るだけ。
+function exportThemeObject(){
+  return Object.assign({ kind:'claude-token-monitor-theme', version:1 }, loadCustomTheme());
+}
+document.getElementById('exportThemeBtn').addEventListener('click', () => {
+  sendToNative(JSON.stringify({
+    type:'exportTheme',
+    json: JSON.stringify(exportThemeObject(), null, 2),
+    filename: 'claude-token-monitor-theme.json',
+  }));
+});
+document.getElementById('importThemeBtn').addEventListener('click', () => {
+  sendToNative(JSON.stringify({ type:'importTheme' }));
+});
+// ネイティブが読み込んだテーマ object を適用。色は normHex で #rrggbb に正規化するため
+// style へ渡るだけで注入経路は無い（base 以外の不正値は既定色になる）。
+function applyImportedTheme(theme){
+  if (!theme || typeof theme !== 'object') return;
+  const c = { base: (theme.base === 'light') ? 'light' : 'dark' };
+  for (const [k] of CUSTOM_FIELDS) c[k] = normHex(theme[k] || DEFAULT_CUSTOM[k]);
+  saveCustomTheme(c);
+  fillCustomEditor();
+  selectTheme('custom');
+}
+// ネイティブ→web の受信振り分け。type を持つものは制御メッセージ（現状 importedTheme のみ）、
+// 持たないものは従来どおりスナップショット。true を返したら snapshot 処理はしない。
+function handleInbound(d){
+  if (d && d.type === 'importedTheme'){ applyImportedTheme(d.theme); return true; }
+  return false;
+}
 
 // ===== 設定モーダルのタブ切替 =============================================
 document.querySelectorAll('.set-tab').forEach(tab => {
@@ -1559,6 +1597,7 @@ function maybeStartPip(){
 if (window.chrome && window.chrome.webview){
   window.chrome.webview.addEventListener('message', (e) => {
     const d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+    if (handleInbound(d)) return;   // 制御メッセージ（テーマ読込など）
     render(d);
     maybeStartPip();
   });
